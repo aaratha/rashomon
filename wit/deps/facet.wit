@@ -1,0 +1,14 @@
+package rashomon:facet;
+
+/// The contract a Component implements to serve as a Facet's logic.
+/// Kept intentionally thin: `string` stands in for the real `ui`
+/// primitive's render payload and for graph-mutation descriptions,
+/// neither of which is designed yet.
+interface facet {
+    /// Render a UI description for the given node.
+    render: func(node-id: string) -> string;
+
+    /// Handle a UI input event, returning a placeholder list of
+    /// resulting graph mutations.
+    handle-input: func(event: string) -> list<string>;
+}

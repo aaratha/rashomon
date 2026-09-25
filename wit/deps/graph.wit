@@ -1,0 +1,52 @@
+package rashomon:graph;
+
+/// Shared data shapes for the graph primitive: Nodes, Edges, and the
+/// role that distinguishes a durable Entity from a weak-identity
+/// Occurrence. See `rashomon-architecture.md` sections 1, 3, and 4.
+interface types {
+    /// Every Node has exactly one role, fixed by the kernel.
+    enum role {
+        entity,
+        occurrence,
+    }
+
+    /// A single string key/value property. A placeholder for a real
+    /// schema system, which is out of scope for this pass.
+    record property {
+        key: string,
+        value: string,
+    }
+
+    /// The generic graph vertex. `node-type` is namespaced, e.g.
+    /// "rashomon:page" or "someauthor:shell-session".
+    record node {
+        id: string,
+        node-type: string,
+        role: role,
+        properties: list<property>,
+    }
+
+    /// A typed, directed link between two Nodes. `source`/`target` hold
+    /// Node ids; named this way (not `from`/`to`) because `from` is a
+    /// reserved WIT keyword.
+    record edge {
+        id: string,
+        kind: string,
+        source: string,
+        target: string,
+        timestamp: u64,
+        confidence: f32,
+    }
+}
+
+/// Read/write access to Nodes and Edges. Signatures only in this pass —
+/// no bodies are implemented yet.
+interface graph {
+    use types.{role, node, edge, property};
+
+    create-node: func(node-type: string, node-role: role, properties: list<property>) -> node;
+    get-node: func(id: string) -> option<node>;
+    create-edge: func(kind: string, source: string, target: string, confidence: f32) -> edge;
+    query-edges-from: func(node-id: string) -> list<edge>;
+    query-edges-to: func(node-id: string) -> list<edge>;
+}

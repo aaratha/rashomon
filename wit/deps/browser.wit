@@ -1,0 +1,25 @@
+package rashomon:browser;
+
+/// Backed natively by CEF; never embedded in WASM itself. A
+/// `browser-context` is a persistent profile (cookies, cache, logins);
+/// a `browser-view` is one navigable surface within a context.
+/// Signatures only — no bodies are implemented yet.
+interface types {
+    resource browser-context {
+        id: func() -> string;
+    }
+
+    resource browser-view {
+        navigate: func(url: string) -> result<_, string>;
+        snapshot-dom: func() -> result<string, string>;
+        inject-script: func(script: string) -> result<string, string>;
+        anchor: func(spec: string) -> result<string, string>;
+    }
+}
+
+interface browser {
+    use types.{browser-context, browser-view};
+
+    create-context: func() -> browser-context;
+    create-view: func(context: borrow<browser-context>) -> browser-view;
+}

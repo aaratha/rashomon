@@ -1,0 +1,8 @@
+package rashomon:host;
+
+/// Target world for a Facet Component: it may read the graph and must
+/// implement the facet contract (render / handle-input).
+world facet-world {
+    import rashomon:graph/graph;
+    export rashomon:facet/facet;
+}

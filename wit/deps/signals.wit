@@ -1,0 +1,19 @@
+package rashomon:signals;
+
+/// Subscribe to graph changes. Signatures only — no bodies are
+/// implemented yet.
+interface signals {
+    record graph-change-event {
+        node-id: string,
+        edge-id: option<string>,
+        kind: string,
+    }
+
+    resource subscription {
+        /// Non-blocking poll for the next change, if any.
+        poll: func() -> option<graph-change-event>;
+        cancel: func();
+    }
+
+    subscribe-to-graph-changes: func(node-id: option<string>) -> subscription;
+}

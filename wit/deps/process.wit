@@ -1,0 +1,20 @@
+package rashomon:process;
+
+/// The `process` resource: the kernel owns the actual `exec()`, a
+/// Component only ever gets this handle. Signatures only — no bodies
+/// are implemented yet.
+interface types {
+    resource process {
+        write: func(data: list<u8>) -> result<u32, string>;
+        read: func(max-bytes: u32) -> result<list<u8>, string>;
+        resize: func(cols: u32, rows: u32) -> result<_, string>;
+        signal: func(sig: string) -> result<_, string>;
+        wait: func() -> s32;
+    }
+}
+
+interface process {
+    use types.{process};
+
+    spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<process, string>;
+}
