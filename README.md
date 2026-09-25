@@ -1,5 +1,21 @@
 **Note:** This is a heavily AI-assisted demo of an original concept. Much of the current code and implementation will be revised.
 
+## Table of Contents
+
+- [Core Model](#1-core-model)
+- [Layered Overview](#2-layered-overview)
+- [Nodes: Roles vs. Types](#3-nodes-roles-vs-types)
+- [Edges](#4-edges)
+- [Identity: Subjects and Encounters](#5-identity-subjects-and-encounters)
+- [Primitives](#6-primitives)
+- [Self-Hosting](#7-self-hosting)
+- [Packaging and Distribution](#8-packaging-and-distribution)
+- [Concurrency](#9-concurrency)
+- [Tech Stack](#10-tech-stack)
+- [Worked Example](#11-worked-example)
+- [Open / Deferred Decisions](#12-open--deferred-decisions)
+
+---
 
 # Rashomon
 
