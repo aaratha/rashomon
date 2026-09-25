@@ -1,4 +1,7 @@
-# Rashomon — Architecture
+**Note:** This is a heavily AI-assisted demo of an original concept. Much of the current code and implementation will be revised.
+
+
+# Rashomon
 
 A desktop environment built around a persistent graph of information rather than
 conventional applications and files. Anything encountered while computing —
