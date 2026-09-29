@@ -1,12 +1,21 @@
-//! Plain Rust graph types mirroring `wit/deps/graph.wit`, plus a
-//! `GraphStore` trait and an in-memory implementation. No persistence,
-//! no file I/O — see `rashomon-architecture.md` sections 1, 3, 4.
+//! Plain Rust graph types mirroring `wit/deps/graph.wit`, a `GraphStore`
+//! trait, and two implementations: `InMemoryGraphStore` (a `HashMap`,
+//! gone on process exit — fast, used in tests) and `PersistentGraphStore`
+//! (a `petgraph` index backed by a `redb` file, so the graph survives a
+//! restart). See `rashomon-architecture.md` sections 1, 3, 4.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::Direction;
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+const NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+const EDGES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("edges");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
@@ -25,7 +34,7 @@ pub struct Node {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     pub id: String,
-    pub kind: String,
+    pub edge_type: String,
     pub source: String,
     pub target: String,
     pub timestamp: u64,
@@ -35,7 +44,7 @@ pub struct Edge {
 pub trait GraphStore {
     fn create_node(&mut self, node_type: &str, role: Role, properties: HashMap<String, String>) -> Node;
     fn get_node(&self, id: &str) -> Option<Node>;
-    fn create_edge(&mut self, kind: &str, source: &str, target: &str, confidence: f32) -> Edge;
+    fn create_edge(&mut self, edge_type: &str, source: &str, target: &str, confidence: f32) -> Edge;
     fn query_edges_from(&self, node_id: &str) -> Vec<Edge>;
     fn query_edges_to(&self, node_id: &str) -> Vec<Edge>;
 }
@@ -68,14 +77,14 @@ impl GraphStore for InMemoryGraphStore {
         self.nodes.get(id).cloned()
     }
 
-    fn create_edge(&mut self, kind: &str, source: &str, target: &str, confidence: f32) -> Edge {
+    fn create_edge(&mut self, edge_type: &str, source: &str, target: &str, confidence: f32) -> Edge {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_secs();
         let edge = Edge {
             id: Uuid::new_v4().to_string(),
-            kind: kind.to_string(),
+            edge_type: edge_type.to_string(),
             source: source.to_string(),
             target: target.to_string(),
             timestamp,
@@ -91,6 +100,152 @@ impl GraphStore for InMemoryGraphStore {
 
     fn query_edges_to(&self, node_id: &str) -> Vec<Edge> {
         self.edges.values().filter(|e| e.target == node_id).cloned().collect()
+    }
+}
+
+/// A `GraphStore` that survives a restart. A `petgraph::DiGraph` is the
+/// live, queryable index — `query_edges_from`/`query_edges_to` are
+/// adjacency lookups instead of `InMemoryGraphStore`'s full scan — and
+/// every write is also committed to a `redb` file before returning, so
+/// `open`-ing the same path again replays the same graph.
+pub struct PersistentGraphStore {
+    db: Database,
+    graph: DiGraph<Node, Edge>,
+    node_index: HashMap<String, NodeIndex>,
+}
+
+impl PersistentGraphStore {
+    /// Opens (creating if needed) the `redb` file at `path` and replays
+    /// any persisted Nodes and Edges into a fresh in-memory index.
+    pub fn open(path: impl AsRef<Path>) -> Self {
+        let db = Database::create(path).expect("failed to open redb database");
+
+        let mut graph = DiGraph::new();
+        let mut node_index = HashMap::new();
+
+        let read_txn = db.begin_read().expect("failed to begin redb read transaction");
+
+        if let Ok(table) = read_txn.open_table(NODES_TABLE) {
+            for row in table.iter().expect("failed to iterate nodes table") {
+                let (_, value) = row.expect("failed to read node row");
+                let node: Node = serde_json::from_slice(value.value())
+                    .expect("failed to deserialize persisted node");
+                let idx = graph.add_node(node.clone());
+                node_index.insert(node.id, idx);
+            }
+        }
+
+        if let Ok(table) = read_txn.open_table(EDGES_TABLE) {
+            for row in table.iter().expect("failed to iterate edges table") {
+                let (_, value) = row.expect("failed to read edge row");
+                let edge: Edge = serde_json::from_slice(value.value())
+                    .expect("failed to deserialize persisted edge");
+                let source = node_index[&edge.source];
+                let target = node_index[&edge.target];
+                graph.add_edge(source, target, edge);
+            }
+        }
+
+        Self {
+            db,
+            graph,
+            node_index,
+        }
+    }
+
+    fn persist_node(&self, node: &Node) {
+        let bytes = serde_json::to_vec(node).expect("failed to serialize node");
+        let write_txn = self.db.begin_write().expect("failed to begin redb write transaction");
+        {
+            let mut table = write_txn.open_table(NODES_TABLE).expect("failed to open nodes table");
+            table
+                .insert(node.id.as_str(), bytes.as_slice())
+                .expect("failed to persist node");
+        }
+        write_txn.commit().expect("failed to commit node write");
+    }
+
+    fn persist_edge(&self, edge: &Edge) {
+        let bytes = serde_json::to_vec(edge).expect("failed to serialize edge");
+        let write_txn = self.db.begin_write().expect("failed to begin redb write transaction");
+        {
+            let mut table = write_txn.open_table(EDGES_TABLE).expect("failed to open edges table");
+            table
+                .insert(edge.id.as_str(), bytes.as_slice())
+                .expect("failed to persist edge");
+        }
+        write_txn.commit().expect("failed to commit edge write");
+    }
+}
+
+impl GraphStore for PersistentGraphStore {
+    fn create_node(&mut self, node_type: &str, role: Role, properties: HashMap<String, String>) -> Node {
+        let node = Node {
+            id: Uuid::new_v4().to_string(),
+            node_type: node_type.to_string(),
+            role,
+            properties,
+        };
+        self.persist_node(&node);
+        let idx = self.graph.add_node(node.clone());
+        self.node_index.insert(node.id.clone(), idx);
+        node
+    }
+
+    fn get_node(&self, id: &str) -> Option<Node> {
+        let idx = *self.node_index.get(id)?;
+        Some(self.graph[idx].clone())
+    }
+
+    /// Unlike `InMemoryGraphStore`, `source` and `target` must already
+    /// exist as Nodes — petgraph needs their `NodeIndex` to place the
+    /// edge, so an unknown id panics rather than being silently stored.
+    fn create_edge(&mut self, edge_type: &str, source: &str, target: &str, confidence: f32) -> Edge {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_secs();
+        let edge = Edge {
+            id: Uuid::new_v4().to_string(),
+            edge_type: edge_type.to_string(),
+            source: source.to_string(),
+            target: target.to_string(),
+            timestamp,
+            confidence,
+        };
+        self.persist_edge(&edge);
+
+        let source_idx = *self
+            .node_index
+            .get(source)
+            .expect("create_edge: unknown source node id");
+        let target_idx = *self
+            .node_index
+            .get(target)
+            .expect("create_edge: unknown target node id");
+        self.graph.add_edge(source_idx, target_idx, edge.clone());
+
+        edge
+    }
+
+    fn query_edges_from(&self, node_id: &str) -> Vec<Edge> {
+        let Some(&idx) = self.node_index.get(node_id) else {
+            return Vec::new();
+        };
+        self.graph
+            .edges_directed(idx, Direction::Outgoing)
+            .map(|e| e.weight().clone())
+            .collect()
+    }
+
+    fn query_edges_to(&self, node_id: &str) -> Vec<Edge> {
+        let Some(&idx) = self.node_index.get(node_id) else {
+            return Vec::new();
+        };
+        self.graph
+            .edges_directed(idx, Direction::Incoming)
+            .map(|e| e.weight().clone())
+            .collect()
     }
 }
 
@@ -122,7 +277,7 @@ mod tests {
 
         assert_eq!(edge.source, a.id);
         assert_eq!(edge.target, b.id);
-        assert_eq!(edge.kind, "references");
+        assert_eq!(edge.edge_type, "references");
         assert_eq!(edge.confidence, 0.9);
     }
 
@@ -149,5 +304,93 @@ mod tests {
         assert!(to_b.contains(&cb.id));
 
         assert!(store.query_edges_from(&b.id).is_empty());
+    }
+
+    fn temp_db_path() -> tempfile::TempPath {
+        tempfile::NamedTempFile::new()
+            .expect("failed to create temp file")
+            .into_temp_path()
+    }
+
+    #[test]
+    fn persistent_create_and_get_node() {
+        let path = temp_db_path();
+        let mut store = PersistentGraphStore::open(&path);
+        let node = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+
+        assert_eq!(store.get_node(&node.id), Some(node));
+    }
+
+    #[test]
+    fn persistent_get_missing_node_returns_none() {
+        let path = temp_db_path();
+        let store = PersistentGraphStore::open(&path);
+        assert_eq!(store.get_node("does-not-exist"), None);
+    }
+
+    #[test]
+    fn persistent_create_edge_sets_fields() {
+        let path = temp_db_path();
+        let mut store = PersistentGraphStore::open(&path);
+        let a = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+        let b = store.create_node("rashomon:page", Role::Occurrence, HashMap::new());
+
+        let edge = store.create_edge("references", &a.id, &b.id, 0.9);
+
+        assert_eq!(edge.source, a.id);
+        assert_eq!(edge.target, b.id);
+        assert_eq!(edge.edge_type, "references");
+        assert_eq!(edge.confidence, 0.9);
+    }
+
+    #[test]
+    fn persistent_query_edges_from_and_to() {
+        let path = temp_db_path();
+        let mut store = PersistentGraphStore::open(&path);
+        let a = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+        let b = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+        let c = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+
+        let ab = store.create_edge("references", &a.id, &b.id, 1.0);
+        let ac = store.create_edge("references", &a.id, &c.id, 1.0);
+        let cb = store.create_edge("related-to", &c.id, &b.id, 1.0);
+
+        let mut from_a: Vec<String> = store.query_edges_from(&a.id).into_iter().map(|e| e.id).collect();
+        from_a.sort();
+        let mut expected_from_a = vec![ab.id.clone(), ac.id.clone()];
+        expected_from_a.sort();
+        assert_eq!(from_a, expected_from_a);
+
+        let to_b: Vec<String> = store.query_edges_to(&b.id).into_iter().map(|e| e.id).collect();
+        assert_eq!(to_b.len(), 2);
+        assert!(to_b.contains(&ab.id));
+        assert!(to_b.contains(&cb.id));
+
+        assert!(store.query_edges_from(&b.id).is_empty());
+    }
+
+    #[test]
+    fn persistent_store_survives_reopen() {
+        let path = temp_db_path();
+
+        let (node_id, edge_id) = {
+            let mut store = PersistentGraphStore::open(&path);
+            let a = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+            let b = store.create_node("rashomon:page", Role::Occurrence, HashMap::new());
+            let edge = store.create_edge("occurrence-of", &b.id, &a.id, 1.0);
+            (a.id, edge.id)
+        };
+        // `store` is dropped here, closing the redb database — reopening
+        // the same path should replay everything written above.
+
+        let reopened = PersistentGraphStore::open(&path);
+        assert!(reopened.get_node(&node_id).is_some());
+
+        let edges_to_node: Vec<String> = reopened
+            .query_edges_to(&node_id)
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(edges_to_node, vec![edge_id]);
     }
 }

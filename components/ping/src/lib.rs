@@ -1,7 +1,7 @@
 #[allow(warnings)]
 mod bindings;
 
-use bindings::exports::rashomon::facet::facet::Guest;
+use bindings::exports::rashomon::facet::contract::Guest;
 
 struct Component;
 
@@ -10,8 +10,8 @@ impl Guest for Component {
         "ping: hello from the ping component".to_string()
     }
 
-    fn handle_input(_event: String) -> Vec<String> {
-        Vec::new()
+    fn handle_input(event: String) -> Vec<String> {
+        vec![format!("ping saw input: {event}")]
     }
 }
 

@@ -22,21 +22,22 @@ objects.
 | Term         | Meaning                                                                                                                                     |
 |--------------+----------------------------------------------------------------------------------------------------------------------------------------------|
 | *Rashomon*   | the whole system                                                                                                                            |
-| *Kernel*     | the native process owning the graph, primitives, persistence, and the component runtime                                                     |
+| *Kernel*     | the native process owning the graph, identity resolution, persistence, primitives, the component runtime, and the package manager           |
 | *Node*       | the generic graph vertex. Every Node has a *role*: ~entity~ or ~occurrence~                                                                  |
 | *Entity*     | a Node with durable identity — a recurring page, a task, a topic, a browser profile                                                         |
-| *Occurrence* | a Node representing one instance of running into something — this tab load, this shell session, this chat exchange. Weak/no identity of its own; always has exactly one ~occurrence-of~ edge to a Entity |
+| *Occurrence* | a Node representing one instance of running into something — this tab load, this shell session, this chat exchange. Weak/no identity of its own; always has exactly one ~occurrence-of~ edge to an Entity |
 | *Edge*       | a typed, directed link between two Nodes, carrying a timestamp and a confidence score                                                       |
-| *Facet*      | a declared way a Entity can be viewed or acted on (browser, notes, history, graph, terminal…)                                                |
+| *Facet*      | a declared way an Entity can be viewed or acted on (browser, notes, history, graph, terminal…)                                               |
 | *View*       | one live, on-screen instance of a Facet being used right now. Facet = capability; View = an open instance of using it                        |
-| *Component*  | the WASM binary implementing a Facet's logic, or a primitive's native backend                                                                |
+| *Component*  | the sandboxed WASM binary implementing zero or more Facets' logic, and/or declaring, via its manifest, zero or more node/edge types it introduces (at least one of the two). Types are inert schema; only Facets carry behavior. Never implements a Primitive itself, only declares which ones it requires |
+| *Native Backend* | the native, unsandboxed, kernel-bundled code that actually implements a given Primitive — e.g. CEF backing ~rashomon:browser~, a PTY bridge backing ~rashomon:process~. Part of the trusted kernel, not the installable Component ecosystem, despite sometimes shipping as a separate binary/process |
 | *Window*     | the OS-level surface a View is drawn in                                                                                                     |
-| *Primitive*  | a host-implemented capability a Component can be granted access to (graph read/write, process spawn, browser control, network, storage…)    |
+| *Primitive*  | a host-implemented capability a Component can be granted access to (graph read/write, process spawn, browser control, network, storage…). Its backend is always a Native Backend, never an ordinary Component |
 
 One sentence: *the graph is made of Nodes — Entities and Occurrences —
-connected by Edges; a Entity exposes Facets; opening a Facet creates a
-View; a View is drawn in a Window; a View's behavior is implemented by a
-Component; Components talk to the kernel only through Primitives.*
+connected by Edges; an Entity exposes Facets, each implemented by a
+Component; opening a Facet creates a View, which is drawn in a Window;
+Components talk to the kernel only through Primitives.*
 
 #+begin_src dot :file rashomon-concept-flow.png
 digraph concept_flow {
@@ -76,27 +77,29 @@ digraph layered_overview {
     kernel [label="Rashomon Kernel\n(graph storage, identity resolution,\npersistence, primitive implementations,\npackage manager)", fillcolor="#dbe4f0"];
 
     graph_ [label="Graph\n(Nodes + Edges)"];
-    primitives [label="Primitives\n(process, browser, storage,\nui, http, events, clipboard)"];
-    compstore [label="Component Store\n(installed .wasm components +\ntheir declared worlds/capabilities)"];
+    compstore [label="Component Store\n(installed .wasm Components +\ntheir declared manifests)"];
+    compnative [label="Native Backends\n(native, unsandboxed, bundled\nwith the kernel — e.g. CEF,\nPTY bridge)", fillcolor="#dbe4f0"];
 
-    comp_facet [label="Components\n(facet logic, third-party,\nsandboxed)"];
-    comp_native [label="Components\n(primitive backends: native,\nkernel-owned, e.g. CEF, PTY bridge)"];
+    comp_facet [label="Facet Components\n(sandboxed, installable,\ncan be third-party)"];
 
-    views   [label="Views\n(an open instance of a Component\nrendering a Entity's Facet)"];
+    primitives [label="Primitives (kernel-hosted)\n(graph, storage, process, browser,\nhttp, ui, signals, clipboard, notify)"];
+    views   [label="Views\n(an open instance of a Facet,\nrunning a Component's logic)"];
     windows [label="Windows\n(host-provided presentation surface\n— a pane, a popup, a tab, etc.)"];
 
-    kernel -> graph_;
-    kernel -> primitives;
-    kernel -> compstore;
+    kernel -> graph_        [label="owns"];
+    kernel -> compstore     [label="owns"];
+    kernel -> compnative    [label="bundles"];
 
-    primitives -> comp_facet;
-    primitives -> comp_native;
+    compstore -> comp_facet [label="holds"];
 
-    comp_facet -> views;
-    views -> windows;
+    comp_facet -> primitives [label="uses"];
+    compnative -> primitives [label="implements"];
 
-    { rank=same; graph_; primitives; compstore; }
-    { rank=same; comp_facet; comp_native; }
+    comp_facet -> views  [label="opens as"];
+    views -> windows     [label="drawn in"];
+
+    { rank=same; graph_; compstore; compnative; }
+    { rank=same; comp_facet; }
 }
 #+end_src
 
@@ -124,6 +127,47 @@ node-type shell-session {
 Types are namespaced (~rashomon:page~, ~someauthor:shell-session~) so two
 components can't collide on the same name.
 
+A type is deliberately just a shape: a *role* plus a *properties* block,
+nothing else. It has no attached behavior, so the kernel (and any Facet,
+whether or not it's the one that introduced the type) can always safely
+store and inspect it. All actual logic — rendering, proposing
+identity-resolution keys, interpreting edges — lives in Facets, never in a
+type declaration.
+
+Because of that split, implementing a Facet, introducing a node type, and
+introducing an edge type are three *independent* things a Component's
+manifest can declare, not a package deal. A Component can be as small as a
+single new Facet over an *existing* type (a "kanban board" Facet grouping
+ordinary ~thread~ Entities by status, introducing no new type at all), or
+just a new type with no dedicated Facet (relying on a generic
+outline/thread view to show it), or a full feature bundling a new type
+with every Facet it needs. Here's the fuller end of that spectrum — a
+hypothetical chat Component that both introduces a type and implements
+several Facets over it:
+
+#+begin_src dot :file rashomon-component-surface.png
+digraph component_surface {
+    rankdir=LR;
+    bgcolor="transparent";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fillcolor="#eef2f7", color="#4a5568"];
+    edge [fontname="Helvetica", fontsize=10, color="#4a5568"];
+
+    comp [label="\"chat\" Component\n(one installed .wasm package)", fillcolor="#dbe4f0"];
+    nodetype [label="node type:\nchat-thread (entity)", shape=note, fillcolor="#fdf6e3"];
+    facet1 [label="Facet:\nThread Overview"];
+    facet2 [label="Facet:\nThread Tree"];
+    facet3 [label="Facet:\nAgent Picker"];
+
+    comp -> nodetype [label="introduces"];
+    comp -> facet1   [label="implements"];
+    comp -> facet2   [label="implements"];
+    comp -> facet3   [label="implements"];
+}
+#+end_src
+
+A Component just as easily declares only one of these, or introduces no
+new type at all. Edge types work the same way.
+
 ** Built-in types (ship with the kernel)
 
 #+ATTR_LATEX: :environment tabularx :width \textwidth :align llX
@@ -140,9 +184,9 @@ components can't collide on the same name.
 |-------------------------+------------+-----------------------------------------------------------------------------------------------------------------------------------|
 | ~shell-session~         | occurrence | one PTY-backed terminal run                                                                                                   |
 | ~dev-task~              | entity     | optional richer entity a terminal component could define if generic ~thread~ isn't enough (tracks cwd/branch across sessions) |
-| ~chat-thread~           | entity     | a line of inquiry with an LLM                                                                                                 |
+| ~chat-thread~           | entity     | optional richer entity a chat component could define if generic ~thread~ isn't enough (adds participant/topic keys for identity resolution) |
 | ~chat-exchange~         | occurrence | one specific conversation instance under a ~chat-thread~                                                                      |
-| ~installed-component~   | entity     | the kernel's own package manager represents installed Components as ordinary Nodes — self-hosting in practice                |
+| ~installed-component~   | entity     | the kernel's own package manager mirrors each installed Component as an ordinary Node, so it's queryable/browsable like anything else |
 
 * 4. Edges
 
@@ -166,7 +210,19 @@ components can't collide on the same name.
   browser-context/profile."
 - ~derived-from~ — provenance for generated content (a chat reply derived
   from the anchors in its context; a promoted note derived from a message).
-- ~related-to~ — a deliberately weak, manual "these matter to each other."
+- ~related-to~ — a deliberately weak, manual "these matter to each
+  other." The intended mechanism for surfacing an Entity somewhere beyond
+  its one ~contains~ parent, without relaxing ~contains~'s single-parent
+  tree. Undirected in practice, either side can create it, and an
+  outline-style Facet is expected to render an Entity's ~related-to~ links
+  as a secondary "Related" section alongside its primary ~contains~
+  children, not merged into the tree itself.
+
+Edge types beyond this built-in set are open the same way node types are:
+declared in a Component's manifest, namespaced the same way
+(~rashomon:references~, ~someauthor:blocks~), so a code-review Component
+could introduce its own ~blocks~ or ~reviewed-by~ edge type between issue
+Entities without touching the kernel.
 
 Every edge carries a *timestamp* and a *confidence score* (1.0 for
 anything manual; a real number from the similarity check for automatic
@@ -202,18 +258,34 @@ ever published.
   the identity ladder.
 - ~rashomon:storage~ — a sandboxed scope per Component.
 - ~rashomon:process~ — spawn/manage OS processes via a ~resource process~
-  handle (stream in/out, resize, signal, wait). The kernel owns the actual
-  ~exec()~; a Component never gets a raw syscall.
+  handle (stream in/out, resize, signal, wait). Its Native Backend owns
+  the actual ~exec()~; a Component never gets a raw syscall.
 - ~rashomon:browser~ — ~resource browser-context~ (a persistent profile:
   cookies, cache, logins — itself represented as a ~browser-context~
-  Entity) and ~resource browser-view~ (navigate, DOM snapshot, inject
-  script, anchor, downloads). Backed natively by CEF; never embedded in
-  WASM itself (too heavy, needs native GPU/windowing).
+  Entity) and ~resource browser-tab~ (navigate, DOM snapshot, inject
+  script, anchor, downloads) — a low-level handle for one browsing
+  surface, not to be confused with a Core Model *View*. Backed by CEF as
+  its Native Backend; never embedded in WASM itself (too heavy, needs
+  native GPU/windowing).
 - ~wasi:http~ — standard, reused rather than wrapped.
 - ~rashomon:ui~ — a render-surface contract: a Component hands back a
   description of what to draw; the host draws it.
 - ~rashomon:signals~ — subscribe to graph changes, timers, lifecycle.
 - ~rashomon:clipboard~ / ~rashomon:notify~ — small, obviously-scoped.
+
+This set is closed, not extensible the way Facets and node/edge types
+are: a Component can only ever *require* a Primitive (declare it as an
+import), never implement one. Every Primitive's actual backend is a
+Native Backend, native and unsandboxed by necessity, since a sandboxed
+WASM binary has no ambient authority to spawn processes or drive a
+browser engine on its own. Some Native Backends are inline in the kernel
+binary itself; others (CEF, a PTY bridge) ship as separate native
+processes for isolation, but both are part of the trusted kernel
+distribution, not the installable Component ecosystem. Whether a
+narrower, genuinely lower-risk subset of Primitives (~rashomon:clipboard~,
+~rashomon:notify~) should ever open up to third-party-supplied backends is
+an open question, not the current design — it would mean auditing a very
+different threat model than "sandboxed Component with a declared world."
 
 A Component's declared world (its imports) is static and inspectable
 before install — the permission-prompt story, shown the way an extension's
@@ -269,9 +341,9 @@ edge types, and required primitives — the direct equivalent of a ~.vsix~.
 - *Within a single Component:* true in-guest multithreading needs the
   WebAssembly "shared-everything-threads" proposal, which is still
   immature. *Don't build around it.* Instead, a Component that needs real
-  parallel compute calls a *primitive* implemented natively (multithreaded
-  Rust on the host side) and awaits the result — the same host-mediated
-  pattern as ~rashomon:process~ and ~rashomon:browser~.
+  parallel compute calls a *primitive* backed by a Native Backend
+  (multithreaded Rust on the host side) and awaits the result — the same
+  host-mediated pattern as ~rashomon:process~ and ~rashomon:browser~.
 
 * 10. Tech stack
 
@@ -279,9 +351,9 @@ edge types, and required primitives — the direct equivalent of a ~.vsix~.
 - *WASM runtime:* Wasmtime — the Bytecode Alliance reference
   implementation, furthest along on the Component Model and WASI
   Preview 2.
-- *Browser primitive backend:* CEF via ~cef-rs~ (the Tauri-maintained
-  fork) — actively tracked against current Chromium releases, ships its
-  own binary-download and app-bundling tooling.
+- *Browser primitive Native Backend:* CEF via ~cef-rs~ (the
+  Tauri-maintained fork) — actively tracked against current Chromium
+  releases, ships its own binary-download and app-bundling tooling.
 - *Component authoring:* any language with WIT bindings. Rust
   (~cargo-component~) is most mature; JS (~jco~), Python
   (~componentize-py~), and Go (TinyGo) are workable; C/C++ guest support
@@ -339,8 +411,13 @@ a manually rebuilt context.
 - Whether ~rashomon:process~ ships in v1 or waits for the first real
   terminal Facet to design against.
 - Same question for ~rashomon:browser~'s multi-context isolation — build
-  single-context/single-view first.
+  single-context/single-tab first.
 - Scripting/REPL Facet — deferred until the friction is concrete.
 - ~warg~ adoption — revisit once it's past its early stage.
 - Whether ~contains~ should ever allow multiple parents — currently
-  single-parent by design, with ~references~ covering secondary links.
+  single-parent by design. Multi-parent would cost real complexity: an
+  ambiguous canonical location/breadcrumb for outline Facets, messier move
+  and delete semantics, and the risk of accidentally-created cycles in
+  what's meant to be a strict hierarchy. The likely resolution isn't
+  relaxing ~contains~ itself but leaning on ~related-to~, giving most of
+  the multi-homing benefit without sacrificing a single canonical home.

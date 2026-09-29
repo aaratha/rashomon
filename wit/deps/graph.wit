@@ -26,12 +26,14 @@ interface types {
         properties: list<property>,
     }
 
-    /// A typed, directed link between two Nodes. `source`/`target` hold
-    /// Node ids; named this way (not `from`/`to`) because `from` is a
-    /// reserved WIT keyword.
+    /// A typed, directed link between two Nodes. `edge-type` mirrors
+    /// `node-type` on `node` (namespaced the same way, e.g.
+    /// "rashomon:references"); `source`/`target` hold Node ids, named
+    /// this way (not `from`/`to`) because `from` is a reserved WIT
+    /// keyword.
     record edge {
         id: string,
-        kind: string,
+        edge-type: string,
         source: string,
         target: string,
         timestamp: u64,
@@ -39,14 +41,15 @@ interface types {
     }
 }
 
-/// Read/write access to Nodes and Edges. Signatures only in this pass —
-/// no bodies are implemented yet.
-interface graph {
+/// Read/write access to Nodes and Edges. Named `store`, not `graph`, so
+/// it isn't redundant with the enclosing `rashomon:graph` package.
+/// Signatures only in this pass — no bodies are implemented yet.
+interface store {
     use types.{role, node, edge, property};
 
     create-node: func(node-type: string, node-role: role, properties: list<property>) -> node;
     get-node: func(id: string) -> option<node>;
-    create-edge: func(kind: string, source: string, target: string, confidence: f32) -> edge;
+    create-edge: func(edge-type: string, source: string, target: string, confidence: f32) -> edge;
     query-edges-from: func(node-id: string) -> list<edge>;
     query-edges-to: func(node-id: string) -> list<edge>;
 }

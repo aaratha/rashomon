@@ -13,7 +13,10 @@ interface types {
     }
 }
 
-interface process {
+/// Named `spawner`, not `process`, so it isn't redundant with the
+/// enclosing `rashomon:process` package (the resource above keeps the
+/// doc's canonical name, `process`).
+interface spawner {
     use types.{process};
 
     spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<process, string>;

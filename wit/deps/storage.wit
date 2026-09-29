@@ -1,8 +1,9 @@
 package rashomon:storage;
 
-/// A sandboxed key/value scope per Component. Signatures only — no
-/// bodies are implemented yet.
-interface storage {
+/// A sandboxed key/value scope per Component. Named `kv`, not `storage`,
+/// so it isn't redundant with the enclosing `rashomon:storage` package.
+/// Signatures only — no bodies are implemented yet.
+interface kv {
     get: func(key: string) -> option<list<u8>>;
     set: func(key: string, value: list<u8>) -> result<_, string>;
     delete: func(key: string) -> result<_, string>;

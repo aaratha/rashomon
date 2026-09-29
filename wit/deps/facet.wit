@@ -1,10 +1,11 @@
 package rashomon:facet;
 
 /// The contract a Component implements to serve as a Facet's logic.
-/// Kept intentionally thin: `string` stands in for the real `ui`
-/// primitive's render payload and for graph-mutation descriptions,
-/// neither of which is designed yet.
-interface facet {
+/// Named `contract`, not `facet`, so it isn't redundant with the
+/// enclosing `rashomon:facet` package. Kept intentionally thin: `string`
+/// stands in for the real `ui` primitive's render payload and for
+/// graph-mutation descriptions, neither of which is designed yet.
+interface contract {
     /// Render a UI description for the given node.
     render: func(node-id: string) -> string;
 

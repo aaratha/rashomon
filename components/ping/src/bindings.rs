@@ -85,13 +85,15 @@ pub mod rashomon {
                         .finish()
                 }
             }
-            /// A typed, directed link between two Nodes. `source`/`target` hold
-            /// Node ids; named this way (not `from`/`to`) because `from` is a
-            /// reserved WIT keyword.
+            /// A typed, directed link between two Nodes. `edge-type` mirrors
+            /// `node-type` on `node` (namespaced the same way, e.g.
+            /// "rashomon:references"); `source`/`target` hold Node ids, named
+            /// this way (not `from`/`to`) because `from` is a reserved WIT
+            /// keyword.
             #[derive(Clone)]
             pub struct Edge {
                 pub id: _rt::String,
-                pub kind: _rt::String,
+                pub edge_type: _rt::String,
                 pub source: _rt::String,
                 pub target: _rt::String,
                 pub timestamp: u64,
@@ -104,7 +106,7 @@ pub mod rashomon {
                 ) -> ::core::fmt::Result {
                     f.debug_struct("Edge")
                         .field("id", &self.id)
-                        .field("kind", &self.kind)
+                        .field("edge-type", &self.edge_type)
                         .field("source", &self.source)
                         .field("target", &self.target)
                         .field("timestamp", &self.timestamp)
@@ -113,10 +115,11 @@ pub mod rashomon {
                 }
             }
         }
-        /// Read/write access to Nodes and Edges. Signatures only in this pass —
-        /// no bodies are implemented yet.
+        /// Read/write access to Nodes and Edges. Named `store`, not `graph`, so
+        /// it isn't redundant with the enclosing `rashomon:graph` package.
+        /// Signatures only in this pass — no bodies are implemented yet.
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
-        pub mod graph {
+        pub mod store {
             #[used]
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
@@ -189,7 +192,7 @@ pub mod rashomon {
                     }
                     let ptr5 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "rashomon:graph/graph")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
                     unsafe extern "C" {
                         #[link_name = "create-node"]
                         fn wit_import6(
@@ -319,7 +322,7 @@ pub mod rashomon {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "rashomon:graph/graph")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
                     unsafe extern "C" {
                         #[link_name = "get-node"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -428,7 +431,7 @@ pub mod rashomon {
             }
             #[allow(unused_unsafe, clippy::all)]
             pub fn create_edge(
-                kind: &str,
+                edge_type: &str,
                 source: &str,
                 target: &str,
                 confidence: f32,
@@ -444,7 +447,7 @@ pub mod rashomon {
                         [::core::mem::MaybeUninit::uninit(); 16
                             + 8 * ::core::mem::size_of::<*const u8>()],
                     );
-                    let vec0 = kind;
+                    let vec0 = edge_type;
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     let vec1 = source;
@@ -455,7 +458,7 @@ pub mod rashomon {
                     let len2 = vec2.len();
                     let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "rashomon:graph/graph")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
                     unsafe extern "C" {
                         #[link_name = "create-edge"]
                         fn wit_import4(
@@ -532,7 +535,7 @@ pub mod rashomon {
                         .cast::<f32>();
                     let result19 = super::super::super::rashomon::graph::types::Edge {
                         id: _rt::string_lift(bytes7),
-                        kind: _rt::string_lift(bytes10),
+                        edge_type: _rt::string_lift(bytes10),
                         source: _rt::string_lift(bytes13),
                         target: _rt::string_lift(bytes16),
                         timestamp: l17 as u64,
@@ -560,7 +563,7 @@ pub mod rashomon {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "rashomon:graph/graph")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
                     unsafe extern "C" {
                         #[link_name = "query-edges-from"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -631,7 +634,7 @@ pub mod rashomon {
                                 .cast::<f32>();
                             super::super::super::rashomon::graph::types::Edge {
                                 id: _rt::string_lift(bytes7),
-                                kind: _rt::string_lift(bytes10),
+                                edge_type: _rt::string_lift(bytes10),
                                 source: _rt::string_lift(bytes13),
                                 target: _rt::string_lift(bytes16),
                                 timestamp: l17 as u64,
@@ -668,7 +671,7 @@ pub mod rashomon {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "rashomon:graph/graph")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
                     unsafe extern "C" {
                         #[link_name = "query-edges-to"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -739,7 +742,7 @@ pub mod rashomon {
                                 .cast::<f32>();
                             super::super::super::rashomon::graph::types::Edge {
                                 id: _rt::string_lift(bytes7),
-                                kind: _rt::string_lift(bytes10),
+                                edge_type: _rt::string_lift(bytes10),
                                 source: _rt::string_lift(bytes13),
                                 target: _rt::string_lift(bytes16),
                                 timestamp: l17 as u64,
@@ -759,6 +762,515 @@ pub mod rashomon {
             }
         }
     }
+    pub mod process {
+        /// The `process` resource: the kernel owns the actual `exec()`, a
+        /// Component only ever gets this handle. Signatures only — no bodies
+        /// are implemented yet.
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod types {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct Process {
+                handle: _rt::Resource<Process>,
+            }
+            impl Process {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for Process {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(wasm_import_module = "rashomon:process/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]process"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            impl Process {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn write(&self, data: &[u8]) -> Result<u32, _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = data;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:process/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]process.write"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result8 = match l3 {
+                            0 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<i32>();
+                                    l4 as u32
+                                };
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l5 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l6 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len7 = l6;
+                                    let bytes7 = _rt::Vec::from_raw_parts(
+                                        l5.cast(),
+                                        len7,
+                                        len7,
+                                    );
+                                    _rt::string_lift(bytes7)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result8
+                    }
+                }
+            }
+            impl Process {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn read(&self, max_bytes: u32) -> Result<_rt::Vec<u8>, _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:process/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]process.read"]
+                            fn wit_import1(_: i32, _: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import1(
+                                (self).handle() as i32,
+                                _rt::as_i32(&max_bytes),
+                                ptr0,
+                            )
+                        };
+                        let l2 = i32::from(*ptr0.add(0).cast::<u8>());
+                        let result9 = match l2 {
+                            0 => {
+                                let e = {
+                                    let l3 = *ptr0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l4 = *ptr0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len5 = l4;
+                                    _rt::Vec::from_raw_parts(l3.cast(), len5, len5)
+                                };
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l6 = *ptr0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l7 = *ptr0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len8 = l7;
+                                    let bytes8 = _rt::Vec::from_raw_parts(
+                                        l6.cast(),
+                                        len8,
+                                        len8,
+                                    );
+                                    _rt::string_lift(bytes8)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result9
+                    }
+                }
+            }
+            impl Process {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn resize(&self, cols: u32, rows: u32) -> Result<(), _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:process/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]process.resize"]
+                            fn wit_import1(_: i32, _: i32, _: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(
+                            _: i32,
+                            _: i32,
+                            _: i32,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import1(
+                                (self).handle() as i32,
+                                _rt::as_i32(&cols),
+                                _rt::as_i32(&rows),
+                                ptr0,
+                            )
+                        };
+                        let l2 = i32::from(*ptr0.add(0).cast::<u8>());
+                        let result6 = match l2 {
+                            0 => {
+                                let e = ();
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l3 = *ptr0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l4 = *ptr0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len5 = l4;
+                                    let bytes5 = _rt::Vec::from_raw_parts(
+                                        l3.cast(),
+                                        len5,
+                                        len5,
+                                    );
+                                    _rt::string_lift(bytes5)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result6
+                    }
+                }
+            }
+            impl Process {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn signal(&self, sig: &str) -> Result<(), _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = sig;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:process/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]process.signal"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result7 = match l3 {
+                            0 => {
+                                let e = ();
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l5 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len6 = l5;
+                                    let bytes6 = _rt::Vec::from_raw_parts(
+                                        l4.cast(),
+                                        len6,
+                                        len6,
+                                    );
+                                    _rt::string_lift(bytes6)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result7
+                    }
+                }
+            }
+            impl Process {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn wait(&self) -> i32 {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:process/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]process.wait"]
+                            fn wit_import0(_: i32) -> i32;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0(_: i32) -> i32 {
+                            unreachable!()
+                        }
+                        let ret = unsafe { wit_import0((self).handle() as i32) };
+                        ret
+                    }
+                }
+            }
+        }
+        /// Named `spawner`, not `process`, so it isn't redundant with the
+        /// enclosing `rashomon:process` package (the resource above keeps the
+        /// doc's canonical name, `process`).
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod spawner {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type Process = super::super::super::rashomon::process::types::Process;
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn spawn(
+                command: &str,
+                args: &[_rt::String],
+                cwd: Option<&str>,
+            ) -> Result<Process, _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = command;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let vec2 = args;
+                    let len2 = vec2.len();
+                    let layout2 = _rt::alloc::Layout::from_size_align_unchecked(
+                        vec2.len() * (2 * ::core::mem::size_of::<*const u8>()),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let result2 = if layout2.size() != 0 {
+                        let ptr = _rt::alloc::alloc(layout2).cast::<u8>();
+                        if ptr.is_null() {
+                            _rt::alloc::handle_alloc_error(layout2);
+                        }
+                        ptr
+                    } else {
+                        ::core::ptr::null_mut()
+                    };
+                    for (i, e) in vec2.into_iter().enumerate() {
+                        let base = result2
+                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
+                        {
+                            let vec1 = e;
+                            let ptr1 = vec1.as_ptr().cast::<u8>();
+                            let len1 = vec1.len();
+                            *base
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len1;
+                            *base.add(0).cast::<*mut u8>() = ptr1.cast_mut();
+                        }
+                    }
+                    let (result4_0, result4_1, result4_2) = match cwd {
+                        Some(e) => {
+                            let vec3 = e;
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            (1i32, ptr3.cast_mut(), len3)
+                        }
+                        None => (0i32, ::core::ptr::null_mut(), 0usize),
+                    };
+                    let ptr5 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:process/spawner")]
+                    unsafe extern "C" {
+                        #[link_name = "spawn"]
+                        fn wit_import6(
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                            _: usize,
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        );
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import6(
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                        _: usize,
+                        _: i32,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe {
+                        wit_import6(
+                            ptr0.cast_mut(),
+                            len0,
+                            result2,
+                            len2,
+                            result4_0,
+                            result4_1,
+                            result4_2,
+                            ptr5,
+                        )
+                    };
+                    let l7 = i32::from(*ptr5.add(0).cast::<u8>());
+                    let result12 = match l7 {
+                        0 => {
+                            let e = {
+                                let l8 = *ptr5
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<i32>();
+                                unsafe {
+                                    super::super::super::rashomon::process::types::Process::from_handle(
+                                        l8 as u32,
+                                    )
+                                }
+                            };
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l9 = *ptr5
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l10 = *ptr5
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len11 = l10;
+                                let bytes11 = _rt::Vec::from_raw_parts(
+                                    l9.cast(),
+                                    len11,
+                                    len11,
+                                );
+                                _rt::string_lift(bytes11)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    if layout2.size() != 0 {
+                        _rt::alloc::dealloc(result2.cast(), layout2);
+                    }
+                    result12
+                }
+            }
+        }
+    }
 }
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
@@ -766,11 +1278,12 @@ pub mod exports {
     pub mod rashomon {
         pub mod facet {
             /// The contract a Component implements to serve as a Facet's logic.
-            /// Kept intentionally thin: `string` stands in for the real `ui`
-            /// primitive's render payload and for graph-mutation descriptions,
-            /// neither of which is designed yet.
+            /// Named `contract`, not `facet`, so it isn't redundant with the
+            /// enclosing `rashomon:facet` package. Kept intentionally thin: `string`
+            /// stands in for the real `ui` primitive's render payload and for
+            /// graph-mutation descriptions, neither of which is designed yet.
             #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
-            pub mod facet {
+            pub mod contract {
                 #[used]
                 #[doc(hidden)]
                 static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
@@ -881,28 +1394,28 @@ pub mod exports {
                     fn handle_input(event: _rt::String) -> _rt::Vec<_rt::String>;
                 }
                 #[doc(hidden)]
-                macro_rules! __export_rashomon_facet_facet_cabi {
+                macro_rules! __export_rashomon_facet_contract_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "rashomon:facet/facet#render")] unsafe extern "C" fn
+                        "rashomon:facet/contract#render")] unsafe extern "C" fn
                         export_render(arg0 : * mut u8, arg1 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_render_cabi::<$ty > (arg0,
                         arg1) } } #[unsafe (export_name =
-                        "cabi_post_rashomon:facet/facet#render")] unsafe extern "C" fn
+                        "cabi_post_rashomon:facet/contract#render")] unsafe extern "C" fn
                         _post_return_render(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_render::<$ty > (arg0) } }
-                        #[unsafe (export_name = "rashomon:facet/facet#handle-input")]
+                        #[unsafe (export_name = "rashomon:facet/contract#handle-input")]
                         unsafe extern "C" fn export_handle_input(arg0 : * mut u8, arg1 :
                         usize,) -> * mut u8 { unsafe { $($path_to_types)*::
                         _export_handle_input_cabi::<$ty > (arg0, arg1) } } #[unsafe
-                        (export_name = "cabi_post_rashomon:facet/facet#handle-input")]
+                        (export_name = "cabi_post_rashomon:facet/contract#handle-input")]
                         unsafe extern "C" fn _post_return_handle_input(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_handle_input::<$ty
                         > (arg0) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub(crate) use __export_rashomon_facet_facet_cabi;
+                pub(crate) use __export_rashomon_facet_contract_cabi;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
@@ -962,6 +1475,139 @@ mod _rt {
             self as f32
         }
     }
+    use core::fmt;
+    use core::marker;
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    /// A type which represents a component model resource, either imported or
+    /// exported into this component.
+    ///
+    /// This is a low-level wrapper which handles the lifetime of the resource
+    /// (namely this has a destructor). The `T` provided defines the component model
+    /// intrinsics that this wrapper uses.
+    ///
+    /// One of the chief purposes of this type is to provide `Deref` implementations
+    /// to access the underlying data when it is owned.
+    ///
+    /// This type is primarily used in generated code for exported and imported
+    /// resources.
+    #[repr(transparent)]
+    pub struct Resource<T: WasmResource> {
+        handle: AtomicU32,
+        _marker: marker::PhantomData<T>,
+    }
+    /// A trait which all wasm resources implement, namely providing the ability to
+    /// drop a resource.
+    ///
+    /// This generally is implemented by generated code, not user-facing code.
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe trait WasmResource {
+        /// Invokes the `[resource-drop]...` intrinsic.
+        unsafe fn drop(handle: u32);
+    }
+    impl<T: WasmResource> Resource<T> {
+        #[doc(hidden)]
+        pub unsafe fn from_handle(handle: u32) -> Self {
+            debug_assert!(handle != u32::MAX);
+            Self {
+                handle: AtomicU32::new(handle),
+                _marker: marker::PhantomData,
+            }
+        }
+        /// Takes ownership of the handle owned by `resource`.
+        ///
+        /// Note that this ideally would be `into_handle` taking `Resource<T>` by
+        /// ownership. The code generator does not enable that in all situations,
+        /// unfortunately, so this is provided instead.
+        ///
+        /// Also note that `take_handle` is in theory only ever called on values
+        /// owned by a generated function. For example a generated function might
+        /// take `Resource<T>` as an argument but then call `take_handle` on a
+        /// reference to that argument. In that sense the dynamic nature of
+        /// `take_handle` should only be exposed internally to generated code, not
+        /// to user code.
+        #[doc(hidden)]
+        pub fn take_handle(resource: &Resource<T>) -> u32 {
+            resource.handle.swap(u32::MAX, Relaxed)
+        }
+        #[doc(hidden)]
+        pub fn handle(resource: &Resource<T>) -> u32 {
+            resource.handle.load(Relaxed)
+        }
+    }
+    impl<T: WasmResource> fmt::Debug for Resource<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Resource").field("handle", &self.handle).finish()
+        }
+    }
+    impl<T: WasmResource> Drop for Resource<T> {
+        fn drop(&mut self) {
+            unsafe {
+                match self.handle.load(Relaxed) {
+                    u32::MAX => {}
+                    other => T::drop(other),
+                }
+            }
+        }
+    }
+    pub fn as_i32<T: AsI32>(t: T) -> i32 {
+        t.as_i32()
+    }
+    pub trait AsI32 {
+        fn as_i32(self) -> i32;
+    }
+    impl<'a, T: Copy + AsI32> AsI32 for &'a T {
+        fn as_i32(self) -> i32 {
+            (*self).as_i32()
+        }
+    }
+    impl AsI32 for i32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for char {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for usize {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -992,37 +1638,47 @@ macro_rules! __export_facet_world_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::rashomon::facet::facet::__export_rashomon_facet_facet_cabi!($ty
-        with_types_in $($path_to_types_root)*:: exports::rashomon::facet::facet);
+        exports::rashomon::facet::contract::__export_rashomon_facet_contract_cabi!($ty
+        with_types_in $($path_to_types_root)*:: exports::rashomon::facet::contract);
     };
 }
 #[doc(inline)]
 pub(crate) use __export_facet_world_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:rashomon:host:facet-world:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:rashomon:runtime:facet-world:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 777] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x87\x05\x01A\x02\x01\
-A\x0a\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1189] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa3\x08\x01A\x02\x01\
+A\x0f\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
 keys\x05values\x04\0\x08property\x03\0\x02\x01p\x03\x01r\x04\x02ids\x09node-type\
-s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x04kinds\
-\x06sources\x06targets\x09timestampw\x0aconfidencev\x04\0\x04edge\x03\0\x07\x03\0\
-\x14rashomon:graph/types\x05\0\x02\x03\0\0\x04role\x02\x03\0\0\x04node\x02\x03\0\
-\0\x04edge\x02\x03\0\0\x08property\x01B\x14\x02\x03\x02\x01\x01\x04\0\x04role\x03\
-\0\0\x02\x03\x02\x01\x02\x04\0\x04node\x03\0\x02\x02\x03\x02\x01\x03\x04\0\x04ed\
-ge\x03\0\x04\x02\x03\x02\x01\x04\x04\0\x08property\x03\0\x06\x01p\x07\x01@\x03\x09\
-node-types\x09node-role\x01\x0aproperties\x08\0\x03\x04\0\x0bcreate-node\x01\x09\
-\x01k\x03\x01@\x01\x02ids\0\x0a\x04\0\x08get-node\x01\x0b\x01@\x04\x04kinds\x06s\
-ources\x06targets\x0aconfidencev\0\x05\x04\0\x0bcreate-edge\x01\x0c\x01p\x05\x01\
-@\x01\x07node-ids\0\x0d\x04\0\x10query-edges-from\x01\x0e\x04\0\x0equery-edges-t\
-o\x01\x0e\x03\0\x14rashomon:graph/graph\x05\x05\x01B\x05\x01@\x01\x07node-ids\0s\
-\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0chandle-input\x01\x02\
-\x04\0\x14rashomon:facet/facet\x05\x06\x04\0\x19rashomon:host/facet-world\x04\0\x0b\
-\x11\x01\0\x0bfacet-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit\
--component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x09edge-\
+types\x06sources\x06targets\x09timestampw\x0aconfidencev\x04\0\x04edge\x03\0\x07\
+\x03\0\x14rashomon:graph/types\x05\0\x02\x03\0\0\x04role\x02\x03\0\0\x04node\x02\
+\x03\0\0\x04edge\x02\x03\0\0\x08property\x01B\x14\x02\x03\x02\x01\x01\x04\0\x04r\
+ole\x03\0\0\x02\x03\x02\x01\x02\x04\0\x04node\x03\0\x02\x02\x03\x02\x01\x03\x04\0\
+\x04edge\x03\0\x04\x02\x03\x02\x01\x04\x04\0\x08property\x03\0\x06\x01p\x07\x01@\
+\x03\x09node-types\x09node-role\x01\x0aproperties\x08\0\x03\x04\0\x0bcreate-node\
+\x01\x09\x01k\x03\x01@\x01\x02ids\0\x0a\x04\0\x08get-node\x01\x0b\x01@\x04\x09ed\
+ge-types\x06sources\x06targets\x0aconfidencev\0\x05\x04\0\x0bcreate-edge\x01\x0c\
+\x01p\x05\x01@\x01\x07node-ids\0\x0d\x04\0\x10query-edges-from\x01\x0e\x04\0\x0e\
+query-edges-to\x01\x0e\x03\0\x14rashomon:graph/store\x05\x05\x01B\x10\x04\0\x07p\
+rocess\x03\x01\x01h\0\x01p}\x01j\x01y\x01s\x01@\x02\x04self\x01\x04data\x02\0\x03\
+\x04\0\x15[method]process.write\x01\x04\x01j\x01\x02\x01s\x01@\x02\x04self\x01\x09\
+max-bytesy\0\x05\x04\0\x14[method]process.read\x01\x06\x01j\0\x01s\x01@\x03\x04s\
+elf\x01\x04colsy\x04rowsy\0\x07\x04\0\x16[method]process.resize\x01\x08\x01@\x02\
+\x04self\x01\x03sigs\0\x07\x04\0\x16[method]process.signal\x01\x09\x01@\x01\x04s\
+elf\x01\0z\x04\0\x14[method]process.wait\x01\x0a\x03\0\x16rashomon:process/types\
+\x05\x06\x02\x03\0\x02\x07process\x01B\x08\x02\x03\x02\x01\x07\x04\0\x07process\x03\
+\0\0\x01ps\x01ks\x01i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\x02\x03\
+cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x03\0\x18rashomon:process/spawner\x05\x08\x01\
+B\x05\x01@\x01\x07node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\
+\x04\0\x0chandle-input\x01\x02\x04\0\x17rashomon:facet/contract\x05\x09\x04\0\x1c\
+rashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bfacet-world\x03\0\0\0G\x09pr\
+oducers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x06\
+0.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

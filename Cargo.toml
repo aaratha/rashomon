@@ -4,10 +4,11 @@ members = [
     "crates/rashomon-graph",
     "crates/rashomon-kernel",
 ]
-# The `ping` component targets wasm32-wasip1 via cargo-component and has
-# its own toolchain/dependency graph (see components/ping/README or the
-# root README) — it is built independently, not as a workspace member.
-exclude = ["components/ping"]
+# The `ping`/`shell` components target wasm32-wasip1 via cargo-component
+# and have their own toolchain/dependency graph (see components/ping/README
+# or the root README) — they are built independently, not as workspace
+# members.
+exclude = ["components/ping", "components/shell"]
 
 [workspace.package]
 edition = "2021"

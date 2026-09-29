@@ -1,8 +1,9 @@
 package rashomon:signals;
 
-/// Subscribe to graph changes. Signatures only — no bodies are
-/// implemented yet.
-interface signals {
+/// Subscribe to graph changes. Named `subscribe`, not `signals`, so it
+/// isn't redundant with the enclosing `rashomon:signals` package.
+/// Signatures only — no bodies are implemented yet.
+interface subscribe {
     record graph-change-event {
         node-id: string,
         edge-id: option<string>,

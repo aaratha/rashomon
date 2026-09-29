@@ -2,14 +2,16 @@ package rashomon:browser;
 
 /// Backed natively by CEF; never embedded in WASM itself. A
 /// `browser-context` is a persistent profile (cookies, cache, logins);
-/// a `browser-view` is one navigable surface within a context.
+/// a `browser-tab` is one navigable surface within a context — named
+/// `tab`, not `view`, so this low-level handle isn't confused with a
+/// Core Model *View* (an open instance of a Facet).
 /// Signatures only — no bodies are implemented yet.
 interface types {
     resource browser-context {
         id: func() -> string;
     }
 
-    resource browser-view {
+    resource browser-tab {
         navigate: func(url: string) -> result<_, string>;
         snapshot-dom: func() -> result<string, string>;
         inject-script: func(script: string) -> result<string, string>;
@@ -17,9 +19,12 @@ interface types {
     }
 }
 
-interface browser {
-    use types.{browser-context, browser-view};
+/// Named `control` (the doc's own term, "browser control"), not
+/// `browser`, so it isn't redundant with the enclosing `rashomon:browser`
+/// package.
+interface control {
+    use types.{browser-context, browser-tab};
 
     create-context: func() -> browser-context;
-    create-view: func(context: borrow<browser-context>) -> browser-view;
+    create-tab: func(context: borrow<browser-context>) -> browser-tab;
 }

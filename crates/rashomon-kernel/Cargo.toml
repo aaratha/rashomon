@@ -28,6 +28,9 @@ thiserror = "2"
 # Nothing in this crate calls into it yet — see README.md for what
 # enabling this feature actually requires at build time.
 cef = { version = "154.0.0", optional = true }
+directories = "6.0.0"
+winit = "0.30.13"
+softbuffer = "0.4.8"
 
 [features]
 browser = ["dep:cef"]

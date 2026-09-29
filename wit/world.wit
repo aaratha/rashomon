@@ -1,8 +1,10 @@
-package rashomon:host;
+package rashomon:runtime;
 
-/// Target world for a Facet Component: it may read the graph and must
-/// implement the facet contract (render / handle-input).
+/// Target world for a Facet Component: it may read the graph, spawn OS
+/// processes, and must implement the facet contract (render /
+/// handle-input).
 world facet-world {
-    import rashomon:graph/graph;
-    export rashomon:facet/facet;
+    import rashomon:graph/store;
+    import rashomon:process/spawner;
+    export rashomon:facet/contract;
 }
