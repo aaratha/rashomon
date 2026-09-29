@@ -1,2 +1,6 @@
 /target
 components/ping/target
+components/shell/target
+components/terminal/target
+components/terminal-xterm/target
+.DS_Store
