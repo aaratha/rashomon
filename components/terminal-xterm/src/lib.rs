@@ -18,12 +18,13 @@ impl Guest for Component {
     /// The `vt100`-based `terminal` Facet parses PTY bytes on the guest
     /// side and hands the host plain text. This Facet does none of
     /// that — it hands the host an HTML document that loads `xterm.js`
-    /// and does the parsing/rendering itself, client-side, once
-    /// there's a CEF-backed `rashomon:ui` that can actually run it. For
-    /// now `render` just embeds a snapshot of whatever the PTY has
-    /// produced so far as the page's initial `term.write(...)` call —
-    /// there's no live host<->page channel yet, so it isn't
-    /// incremental the way the real thing will be.
+    /// and does the parsing/rendering itself, client-side. `render`
+    /// only embeds a snapshot of whatever the PTY has produced so far,
+    /// as the page's initial `term.write(...)` call — anything after
+    /// that arrives via `poll_output` below, which the host calls on a
+    /// recurring timer and injects into the already-loaded page. Input
+    /// (`term.onData` -> `window.cefQuery` -> `handle_input` below) is
+    /// real too, wired through rashomon-kernel's CEF message router.
     fn render(node_id: String) -> String {
         SESSION.with_borrow_mut(|session| {
             if session.is_none() {
@@ -71,6 +72,29 @@ impl Guest for Component {
         });
         Vec::new()
     }
+
+    /// Drains whatever PTY output has arrived since the last call (from
+    /// `render` or this) and returns it as plain text — raw, not
+    /// JS-escaped, since the host does its own (base64-based, so it's
+    /// binary-safe) encoding when building the `term.write(...)` call
+    /// this feeds. Empty string if the session doesn't exist yet or
+    /// nothing new has arrived.
+    fn poll_output() -> String {
+        SESSION.with_borrow(|session| {
+            let Some(process) = session.as_ref() else {
+                return String::new();
+            };
+            let mut output = Vec::new();
+            loop {
+                match process.read(4096) {
+                    Ok(chunk) if chunk.is_empty() => break,
+                    Ok(chunk) => output.extend(chunk),
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&output).into_owned()
+        })
+    }
 }
 
 /// Escapes `s` for embedding inside a single-quoted JS string literal —
@@ -108,13 +132,21 @@ fn render_page(initial_output: &str) -> String {
   term.open(document.getElementById('terminal'));
   term.write('{initial}');
 
-  // TODO(rashomon:ui): once a CEF-backed message bridge exists, wire
-  // this to call `handle-input` on the Facet instead of just logging —
-  // and likewise, the host should push new PTY bytes into `term.write`
-  // as they arrive instead of `render` only ever describing a static
-  // snapshot the way it does today.
+  // The host's message router registers `window.cefQuery` in this
+  // context (see rashomon-kernel's RenderProcessHandler) and forwards
+  // the request string verbatim to this Facet's handle-input.
+  //
+  // Live output between renders arrives via a separate
+  // `term.write(...)` call the host injects on a recurring poll of
+  // `poll-output` (see rashomon-kernel's `OutputPollTask`) — this
+  // initial `term.write` above only covers whatever had already
+  // buffered up before the page loaded.
   term.onData((data) => {{
-    console.log('terminal-xterm: onData (not yet wired to a host bridge):', data);
+    window.cefQuery({{
+      request: data,
+      onSuccess: function () {{}},
+      onFailure: function () {{}},
+    }});
   }});
 </script>
 </body>

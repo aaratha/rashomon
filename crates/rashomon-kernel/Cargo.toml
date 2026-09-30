@@ -3,9 +3,20 @@ name = "rashomon-kernel"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "rashomon_kernel"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rashomon-kernel"
 path = "src/main.rs"
+
+[[bin]]
+name = "rashomon-kernel-helper"
+path = "src/helper.rs"
+
+[package.metadata.cef.bundle]
+helper_name = "rashomon-kernel-helper"
 
 [dependencies]
 rashomon-graph = { path = "../rashomon-graph" }
@@ -23,16 +34,24 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 thiserror = "2"
 
-# Off by default. Pulls in the Tauri-maintained CEF bindings so
-# `rashomon:browser` can eventually be backed by a real browser engine.
-# Nothing in this crate calls into it yet — see README.md for what
-# enabling this feature actually requires at build time.
-cef = { version = "154.0.0", optional = true }
+# The Tauri-maintained CEF bindings — the Native Backend for both
+# `rashomon:browser` and windowing/UI generally now (see the module doc
+# comment). `sandbox` is off: the macOS app-bundle-with-helper-processes
+# structure it needs is still required either way (see
+# `crates/cef-spike`), but skipping the OS-level sandbox itself keeps
+# this validation's settings simple.
+cef = { version = "154.0.0", default-features = false, features = ["build-util", "resources"] }
 directories = "6.0.0"
-winit = "0.30.13"
-softbuffer = "0.4.8"
 portable-pty = "0.9.0"
-noto-sans-mono-bitmap = "0.3.2"
 
-[features]
-browser = ["dep:cef"]
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSUserInterfaceValidation",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [] }

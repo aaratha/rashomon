@@ -13,6 +13,10 @@ impl Guest for Component {
     fn handle_input(event: String) -> Vec<String> {
         vec![format!("ping saw input: {event}")]
     }
+
+    fn poll_output() -> String {
+        String::new()
+    }
 }
 
 bindings::export!(Component with_types_in bindings);

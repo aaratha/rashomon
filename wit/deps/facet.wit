@@ -12,4 +12,11 @@ interface contract {
     /// Handle a UI input event, returning a placeholder list of
     /// resulting graph mutations.
     handle-input: func(event: string) -> list<string>;
+
+    /// Drain and return whatever output has arrived since the last
+    /// call (empty string if nothing new) — for a host-side poll loop
+    /// to push live updates into an already-open View, since `render`
+    /// alone only ever describes a fresh snapshot, not an incremental
+    /// update. Most Facets have nothing to add here.
+    poll-output: func() -> string;
 }

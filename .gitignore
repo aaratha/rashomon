@@ -3,4 +3,6 @@ components/ping/target
 components/shell/target
 components/terminal/target
 components/terminal-xterm/target
+crates/rashomon-kernel/target
+crates/cef-spike/target
 .DS_Store

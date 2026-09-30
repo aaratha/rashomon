@@ -8,7 +8,17 @@ members = [
 # and have their own toolchain/dependency graph (see components/ping/README
 # or the root README) — they are built independently, not as workspace
 # members.
-exclude = ["components/ping", "components/shell", "components/terminal", "components/terminal-xterm"]
+#
+# `cef-spike` is a standalone CEF bootstrap validation, kept out of the
+# main workspace while its native CEF build/link story is still unproven
+# — see crates/cef-spike.
+exclude = [
+    "components/ping",
+    "components/shell",
+    "components/terminal",
+    "components/terminal-xterm",
+    "crates/cef-spike",
+]
 
 [workspace.package]
 edition = "2021"

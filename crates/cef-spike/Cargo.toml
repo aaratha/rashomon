@@ -1,0 +1,28 @@
+[package]
+name = "cef-spike"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cef-spike"
+
+[[bin]]
+name = "cef-spike-helper"
+
+[package.metadata.cef.bundle]
+helper_name = "cef-spike-helper"
+
+[dependencies]
+cef = { version = "154.0.0", default-features = false, features = ["build-util", "resources"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSUserInterfaceValidation",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSObjCRuntime", "NSThread"] }

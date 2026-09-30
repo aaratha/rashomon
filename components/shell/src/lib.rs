@@ -61,6 +61,10 @@ impl Guest for Component {
     fn handle_input(_event: String) -> Vec<String> {
         Vec::new()
     }
+
+    fn poll_output() -> String {
+        String::new()
+    }
 }
 
 bindings::export!(Component with_types_in bindings);

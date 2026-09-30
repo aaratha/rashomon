@@ -1386,12 +1386,41 @@ pub mod exports {
                         ::core::mem::size_of::<*const u8>(),
                     );
                 }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_poll_output_cabi<T: Guest>() -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::poll_output();
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    let vec2 = (result0.into_bytes()).into_boxed_slice();
+                    let ptr2 = vec2.as_ptr().cast::<u8>();
+                    let len2 = vec2.len();
+                    ::core::mem::forget(vec2);
+                    *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len2;
+                    *ptr1.add(0).cast::<*mut u8>() = ptr2.cast_mut();
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_poll_output<T: Guest>(arg0: *mut u8) {
+                    let l0 = *arg0.add(0).cast::<*mut u8>();
+                    let l1 = *arg0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    _rt::cabi_dealloc(l0, l1, 1);
+                }
                 pub trait Guest {
                     /// Render a UI description for the given node.
                     fn render(node_id: _rt::String) -> _rt::String;
                     /// Handle a UI input event, returning a placeholder list of
                     /// resulting graph mutations.
                     fn handle_input(event: _rt::String) -> _rt::Vec<_rt::String>;
+                    /// Drain and return whatever output has arrived since the last
+                    /// call (empty string if nothing new) — for a host-side poll loop
+                    /// to push live updates into an already-open View, since `render`
+                    /// alone only ever describes a fresh snapshot, not an incremental
+                    /// update. Most Facets have nothing to add here.
+                    fn poll_output() -> _rt::String;
                 }
                 #[doc(hidden)]
                 macro_rules! __export_rashomon_facet_contract_cabi {
@@ -1411,7 +1440,14 @@ pub mod exports {
                         (export_name = "cabi_post_rashomon:facet/contract#handle-input")]
                         unsafe extern "C" fn _post_return_handle_input(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_handle_input::<$ty
-                        > (arg0) } } };
+                        > (arg0) } } #[unsafe (export_name =
+                        "rashomon:facet/contract#poll-output")] unsafe extern "C" fn
+                        export_poll_output() -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_poll_output_cabi::<$ty > () } } #[unsafe (export_name =
+                        "cabi_post_rashomon:facet/contract#poll-output")] unsafe extern
+                        "C" fn _post_return_poll_output(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_poll_output::<$ty > (arg0) } }
+                        };
                     };
                 }
                 #[doc(hidden)]
@@ -1650,8 +1686,8 @@ pub(crate) use __export_facet_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1189] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa3\x08\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1210] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb8\x08\x01A\x02\x01\
 A\x0f\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
 keys\x05values\x04\0\x08property\x03\0\x02\x01p\x03\x01r\x04\x02ids\x09node-type\
 s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x09edge-\
@@ -1674,11 +1710,11 @@ elf\x01\0z\x04\0\x14[method]process.wait\x01\x0a\x03\0\x16rashomon:process/types
 \x05\x06\x02\x03\0\x02\x07process\x01B\x08\x02\x03\x02\x01\x07\x04\0\x07process\x03\
 \0\0\x01ps\x01ks\x01i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\x02\x03\
 cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x03\0\x18rashomon:process/spawner\x05\x08\x01\
-B\x05\x01@\x01\x07node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\
-\x04\0\x0chandle-input\x01\x02\x04\0\x17rashomon:facet/contract\x05\x09\x04\0\x1c\
-rashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bfacet-world\x03\0\0\0G\x09pr\
-oducers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x06\
-0.41.0";
+B\x07\x01@\x01\x07node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\
+\x04\0\x0chandle-input\x01\x02\x01@\0\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17r\
+ashomon:facet/contract\x05\x09\x04\0\x1crashomon:runtime/facet-world\x04\0\x0b\x11\
+\x01\0\x0bfacet-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-com\
+ponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
