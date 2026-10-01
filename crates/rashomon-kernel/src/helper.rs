@@ -8,9 +8,12 @@
 //! binaries on top of it. Everything else is unchanged from the
 //! `cef-spike` validation.
 
+#[cfg(target_os = "macos")]
 use cef::*;
+#[cfg(target_os = "macos")]
 use rashomon_kernel::make_minimal_app;
 
+#[cfg(target_os = "macos")]
 fn main() {
     let args = args::Args::new();
 
@@ -25,3 +28,7 @@ fn main() {
     let mut app = make_minimal_app();
     execute_process(Some(args.as_main_args()), Some(&mut app), std::ptr::null_mut());
 }
+
+// Unused outside macOS — see the module doc comment above.
+#[cfg(not(target_os = "macos"))]
+fn main() {}
