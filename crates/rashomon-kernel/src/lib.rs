@@ -4,12 +4,49 @@
 //! interactive PTY-backed terminal, parsed guest-side with `vt100` —
 //! proven via a one-shot render() call, console-only for now), and
 //! `terminal-xterm` (the same PTY, handing the host an `xterm.js` HTML
-//! payload — the window's actual live content, with real input flowing
-//! back via a CEF message-router bridge: `term.onData` ->
-//! `window.cefQuery` -> this crate's `InputQueryHandler` ->
-//! `handle-input`, and live output flowing the other way via a
-//! recurring `OutputPollTask` that calls `poll-output` and pushes any
-//! new bytes into the page with `execute_java_script`). Every
+//! payload — a Facet actually opened as a live View).
+//!
+//! There's no `rashomon:ui` primitive yet (the design doc leaves its
+//! payload format undesigned), so a View's "render surface" is still
+//! just the raw HTML string a Facet's `render` returns — but opening a
+//! View is no longer one hardcoded Facet filling one hardcoded page.
+//! [`Kernel::open_view`] can instantiate any registered Facet against
+//! any Entity and give it its own top-level CEF Window (one real
+//! `browser_host_create_browser` call per View, all sharing one
+//! `Client`/`InputQueryHandler`/`Store` via [`InputBridge`]), which is
+//! not what was originally planned here.
+//!
+//! **Why not one Window with multiple Views as panes:** the first
+//! attempt loaded a single shell page and inserted each View as an
+//! `<iframe srcdoc>` pane via `execute_java_script`. Two separate bugs
+//! showed up chasing that down, both confirmed empirically rather than
+//! assumed: (1) `execute_java_script` silently does nothing when called
+//! from a CEF `Task` (e.g. one scheduled via `post_delayed_task`) —
+//! identical script, called from a genuine Client/Handler callback like
+//! `on_load_end`, ran and logged; called from `Task::execute()`,
+//! returned normally but never actually ran. That one's dodged below by
+//! routing output through the same `cefQuery` round trip input already
+//! uses ([`POLL_REQUEST`]) instead of a host-side push loop. (2) More
+//! fundamentally, dynamically-created `<iframe srcdoc>` elements never
+//! finished navigating in this CEF/Alloy configuration at all — not
+//! even a fully offline, dependency-free one, and not even one declared
+//! statically in the page's own initial HTML (which additionally
+//! blocked the *parent* page's own `on_load_end` from ever firing, since
+//! that normally waits on all initial subresources). Real multi-pane
+//! support belongs to native child-view embedding (`WindowInfo`'s
+//! `parent_view`/`bounds`, the same mechanism `cefclient`'s own
+//! multi-pane UI uses) instead of HTML iframes — a real enough chunk of
+//! per-platform work that it's deliberately left as the next concrete
+//! step, not something to half-do here.
+//!
+//! Input flows back via a CEF message-router bridge: each Window's page
+//! prefixes its `window.cefQuery` calls with its own window id, so one
+//! shared [`InputQueryHandler`] can route a keystroke (or a
+//! [`POLL_REQUEST`]) to the right View's `handle-input` (or
+//! `poll-output`) rather than there being one handler per Window. More
+//! than one Window can mirror the same View this way — see
+//! [`Kernel::open_window`] — with output fanned out so no mirroring
+//! Window loses it to whichever one happens to poll first. Every
 //! primitive is backed by a real host
 //! implementation — `rashomon:graph` by a `PersistentGraphStore` (so
 //! the graph survives a restart), and `rashomon:process` by a real PTY
@@ -27,8 +64,7 @@
 //! context), so both binaries link against this shared library instead
 //! of duplicating that code.
 
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -366,12 +402,188 @@ fn html_data_uri(html: &str) -> String {
     format!("data:text/html;base64,{encoded}")
 }
 
-/// Shared with the browser-side query handler so a `window.cefQuery`
-/// call from the page's JS can reach all the way into a real
-/// `handle-input` call on the Component that produced that page.
+/// The compiled form of every Facet this kernel knows how to open as a
+/// View, plus the one `Linker` they're all instantiated against.
+/// Compiling is the expensive part — this is built once at startup, and
+/// every View is just a fresh, cheap `FacetWorld::instantiate` against
+/// an already-compiled `Component` here.
+struct FacetRegistry {
+    linker: Linker<KernelState>,
+    components: HashMap<String, Component>,
+}
+
+impl FacetRegistry {
+    fn component(&self, facet_name: &str) -> Result<&Component> {
+        self.components
+            .get(facet_name)
+            .ok_or_else(|| anyhow!("no registered facet named {facet_name:?}"))
+    }
+}
+
+/// One live View: a Facet Component instance, plus enough state to let
+/// more than one Window mirror it (see [`Kernel::open_window`]) without
+/// either Window losing output to whichever one happens to poll first.
+struct ViewHandle {
+    bindings: FacetWorld,
+    /// The HTML `render()` produced when this View was first opened.
+    /// Reused verbatim (with a different `window.__rashomonWindowId`
+    /// spliced in) for every later Window that mirrors this View,
+    /// rather than calling `render()` again — `render()`'s own first
+    /// call already drained whatever the Facet had buffered, so a
+    /// second call would show a newly-opened mirror an empty terminal
+    /// instead of the same history the first Window saw.
+    initial_html: String,
+    /// Output `poll-output` has drained but not yet delivered to each
+    /// Window watching this View, keyed by window id. Every Window's
+    /// own `__poll__` request appends freshly-drained bytes to *every*
+    /// entry here (not just its own) before popping its own — that's
+    /// what makes output arrive at every mirroring Window rather than
+    /// being consumed once by whichever Window asked first.
+    pending: HashMap<String, String>,
+}
+
+/// All of this kernel's live, mutable state in one place — shared
+/// (behind one `Arc<Mutex<_>>`, owned by [`Kernel`]) between
+/// [`InputQueryHandler`] (routes every `window.cefQuery` call — input or
+/// a [`POLL_REQUEST`] — to the right View) and the life-span handler
+/// that maintains `browser_count`.
 struct InputBridge {
     store: Store<KernelState>,
-    terminal_xterm_bindings: FacetWorld,
+    /// Set once in `on_context_initialized` and reused for every
+    /// `browser_host_create_browser` call after that — one `Client` can
+    /// back any number of Windows; CEF distinguishes them by the
+    /// `browser`/`frame` each callback receives, not by which `Client`
+    /// instance made the call. `None` only before the app's first
+    /// Window exists.
+    client: Option<Client>,
+    browser_count: u32,
+    /// Every currently-open View, keyed by the id [`Kernel::open_view`]
+    /// assigned it.
+    views: HashMap<String, ViewHandle>,
+    /// Which View each open Window is currently mirroring, keyed by the
+    /// id [`Kernel::open_view`]/[`Kernel::open_window`] assigned that
+    /// Window — the same id embedded in its page as
+    /// `window.__rashomonWindowId`, and sent back as the `<window-id>:`
+    /// prefix on every `window.cefQuery` request that Window's page
+    /// sends. Several Window ids can map to the same View id; that's
+    /// exactly what makes them mirrors of each other.
+    windows: HashMap<String, String>,
+    next_view_id: u64,
+    next_window_id: u64,
+}
+
+/// Everything needed to open a new View or mirror an existing one in a
+/// new Window: which Facets exist to instantiate, and the live state
+/// ([`InputBridge`]) either needs to register itself into.
+struct Kernel {
+    facets: FacetRegistry,
+    bridge: Arc<Mutex<InputBridge>>,
+}
+
+impl Kernel {
+    /// Instantiates `facet_name`'s Component fresh, calls its `render`
+    /// against `node_id` to get its first View, and opens that View in
+    /// a brand-new top-level CEF Window (see the module doc comment for
+    /// why this is a real Window rather than a pane in a shared one,
+    /// for now) — the same as [`Kernel::open_window`] would for any
+    /// later Window mirroring this View, just with a fresh View instead
+    /// of an existing one. Safe to call more than once against the same
+    /// Facet: each call is an independent instantiation (independent
+    /// `SESSION`-style guest state), the same way opening two terminal
+    /// windows in a real OS gives you two independent shells, not one
+    /// shared one — [`Kernel::open_window`] is what shares one.
+    fn open_view(&self, node_id: &str, facet_name: &str) -> Result<String> {
+        let component = self.facets.component(facet_name)?;
+        let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
+
+        let bindings = FacetWorld::instantiate(&mut bridge.store, component, &self.facets.linker)
+            .map_err(|e| anyhow!("failed to instantiate {facet_name}: {e}"))?;
+        let initial_html = bindings
+            .rashomon_facet_contract()
+            .call_render(&mut bridge.store, node_id)
+            .map_err(|e| anyhow!("{facet_name}'s render() failed: {e}"))?;
+
+        let view_id = format!("view-{}", bridge.next_view_id);
+        bridge.next_view_id += 1;
+        bridge.views.insert(
+            view_id.clone(),
+            ViewHandle { bindings, initial_html, pending: HashMap::new() },
+        );
+        drop(bridge);
+
+        self.open_window(&view_id)?;
+        Ok(view_id)
+    }
+
+    /// Opens a new top-level CEF Window mirroring the already-running
+    /// View `view_id`: same `initial_html`, a fresh window id spliced
+    /// in. Input typed into this Window reaches the exact same Facet
+    /// instance (and so the same PTY, for `terminal-xterm`) as every
+    /// other Window mirroring this View; output is fanned out to all of
+    /// them via `pending` (see [`ViewHandle`]).
+    fn open_window(&self, view_id: &str) -> Result<String> {
+        let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
+        let view = bridge
+            .views
+            .get(view_id)
+            .ok_or_else(|| anyhow!("no such view: {view_id}"))?;
+        let html = view.initial_html.clone();
+
+        let window_id = format!("window-{}", bridge.next_window_id);
+        bridge.next_window_id += 1;
+        bridge
+            .views
+            .get_mut(view_id)
+            .expect("just looked this up above")
+            .pending
+            .insert(window_id.clone(), String::new());
+        bridge.windows.insert(window_id.clone(), view_id.to_string());
+
+        let mut client = bridge
+            .client
+            .clone()
+            .ok_or_else(|| anyhow!("no Client yet — called before on_context_initialized?"))?;
+        // Dropped before calling into CEF: `browser_host_create_browser`
+        // can turn around and call `LifeSpanHandler::on_after_created`
+        // (which also locks `self.bridge`) before this function
+        // returns, and `Mutex` isn't reentrant.
+        drop(bridge);
+
+        let window_info = WindowInfo {
+            runtime_style: RuntimeStyle::ALLOY,
+            ..Default::default()
+        };
+        let settings = BrowserSettings::default();
+        let url = CefString::from(html_data_uri(&inject_window_id(&html, &window_id)).as_str());
+        browser_host_create_browser(
+            Some(&window_info),
+            Some(&mut client),
+            Some(&url),
+            Some(&settings),
+            None,
+            None,
+        );
+
+        Ok(window_id)
+    }
+}
+
+/// Splices a `<script>` setting `window.__rashomonWindowId` right after
+/// `html`'s `<head>` tag (or, failing that, right at the very start —
+/// still valid, just less tidy) so a Facet's own page-template script
+/// can read back which Window it's running as, without the Facet's
+/// `render` (fixed by the WIT contract to take only a `node-id`)
+/// needing to know about Windows at all — that's purely a host-side
+/// concept.
+fn inject_window_id(html: &str, window_id: &str) -> String {
+    let script = format!("<script>window.__rashomonWindowId = {window_id:?};</script>");
+    match html.find("<head>") {
+        Some(idx) => {
+            let insert_at = idx + "<head>".len();
+            format!("{}{script}{}", &html[..insert_at], &html[insert_at..])
+        }
+        None => format!("{script}{html}"),
+    }
 }
 
 /// The one router pair for this kernel's one window — see the module
@@ -388,7 +600,32 @@ struct InputQueryHandler {
     bridge: Arc<Mutex<InputBridge>>,
 }
 
+/// The magic suffix a Window's page sends instead of a real input event
+/// to mean "poll for new output" — see
+/// [`InputQueryHandler::on_query_str`]. A page polls itself (via
+/// `setInterval` + `window.cefQuery`) rather than the host pushing into
+/// it with `execute_java_script`, because
+/// `execute_java_script` turns out to silently do nothing when called
+/// from a CEF `Task` scheduled via `post_delayed_task` — only from a
+/// genuine Client/Handler callback (confirmed empirically: identical
+/// script, called from `on_load_end`, ran and logged; called from a
+/// `Task::execute()`, returned normally but never actually ran). Polling
+/// through `cefQuery`'s own request/response round trip sidesteps the
+/// whole question, since that path is a proven-working Handler callback
+/// the whole way, not a Task.
+const POLL_REQUEST: &str = "__poll__";
+
 impl BrowserSideHandler for InputQueryHandler {
+    /// `request` is always `<window-id>:<event>` — every Window's page
+    /// prefixes it that way before calling `window.cefQuery` (see
+    /// `terminal-xterm`'s `render_page`) so this one handler, shared by
+    /// every open Window, can dispatch to the right View. `event` is
+    /// either [`POLL_REQUEST`] (answered from `poll-output`, fanned out
+    /// to every Window mirroring this View — see [`ViewHandle`]) or
+    /// real input (answered from `handle-input`, which reaches the
+    /// exact same Facet instance no matter which mirroring Window sent
+    /// it, so e.g. a PTY's own echo of typed input becomes output every
+    /// mirroring Window's next poll picks up too).
     fn on_query_str(
         &self,
         _browser: Option<Browser>,
@@ -398,12 +635,41 @@ impl BrowserSideHandler for InputQueryHandler {
         _persistent: bool,
         callback: Arc<Mutex<dyn BrowserSideCallback>>,
     ) -> bool {
-        let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
-        let InputBridge { store, terminal_xterm_bindings } = &mut *bridge;
-        let result = terminal_xterm_bindings
-            .rashomon_facet_contract()
-            .call_handle_input(store, request);
         let callback = callback.lock().expect("callback lock poisoned");
+        let Some((window_id, event)) = request.split_once(':') else {
+            callback.failure(-1, "malformed request: missing <window-id>: prefix");
+            return true;
+        };
+
+        let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
+        let InputBridge { store, views, windows, .. } = &mut *bridge;
+        let Some(view_id) = windows.get(window_id) else {
+            callback.failure(-1, &format!("no such window: {window_id}"));
+            return true;
+        };
+        let Some(view) = views.get_mut(view_id) else {
+            callback.failure(-1, &format!("no such view: {view_id}"));
+            return true;
+        };
+
+        if event == POLL_REQUEST {
+            let result = view.bindings.rashomon_facet_contract().call_poll_output(store);
+            match result {
+                Ok(output) => {
+                    if !output.is_empty() {
+                        for pending in view.pending.values_mut() {
+                            pending.push_str(&output);
+                        }
+                    }
+                    let delivered = view.pending.get_mut(window_id).map(std::mem::take).unwrap_or_default();
+                    callback.success_str(&delivered)
+                }
+                Err(e) => callback.failure(-1, &e.to_string()),
+            }
+            return true;
+        }
+
+        let result = view.bindings.rashomon_facet_contract().call_handle_input(store, event);
         match result {
             Ok(_) => callback.success_str("ok"),
             Err(e) => callback.failure(-1, &e.to_string()),
@@ -414,12 +680,12 @@ impl BrowserSideHandler for InputQueryHandler {
 
 wrap_client! {
     pub struct KernelClient {
-        inner: Arc<Mutex<KernelWindowState>>,
+        kernel: Arc<Kernel>,
     }
 
     impl Client {
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(KernelLifeSpanHandler::new(self.inner.clone()))
+            Some(KernelLifeSpanHandler::new(self.kernel.bridge.clone()))
         }
 
         fn on_process_message_received(
@@ -443,139 +709,76 @@ wrap_client! {
     }
 }
 
-struct KernelWindowState {
-    browser_count: u32,
-    /// Set once the browser exists, so the output-poll task (see
-    /// [`OutputPollTask`]) has something to call `execute_java_script`
-    /// on — it starts running before `on_after_created` fires, so it
-    /// has to tolerate this being `None` for its first tick or two.
-    browser: Option<Browser>,
-}
-
 wrap_life_span_handler! {
     struct KernelLifeSpanHandler {
-        inner: Arc<Mutex<KernelWindowState>>,
+        bridge: Arc<Mutex<InputBridge>>,
     }
 
     impl LifeSpanHandler {
-        fn on_after_created(&self, browser: Option<&mut Browser>) {
-            let mut state = self.inner.lock().expect("lock poisoned");
-            state.browser_count += 1;
-            state.browser = browser.cloned();
+        fn on_after_created(&self, _browser: Option<&mut Browser>) {
+            self.bridge.lock().expect("input bridge lock poisoned").browser_count += 1;
         }
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             if let Some(router) = BROWSER_ROUTER.get() {
                 router.on_before_close(browser.cloned());
             }
-            let mut state = self.inner.lock().expect("lock poisoned");
-            state.browser_count -= 1;
-            if state.browser_count == 0 {
+            let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
+            bridge.browser_count -= 1;
+            if bridge.browser_count == 0 {
                 quit_message_loop();
             }
         }
     }
 }
 
+// `initial_views` is `(node_id, facet_name, window_count)` — each entry
+// opens one View (one `node_id`/`facet_name` Facet instantiation) and
+// then mirrors it into `window_count` total Windows via
+// `Kernel::open_window`, so `window_count > 1` is how the "two Windows,
+// one shared terminal session" demo in `run_browser_process` is
+// expressed.
 wrap_browser_process_handler! {
     struct KernelBrowserProcessHandler {
-        client: RefCell<Option<Client>>,
-        html: String,
-        input_bridge: Arc<Mutex<InputBridge>>,
+        kernel: Arc<Kernel>,
+        initial_views: Arc<Vec<(String, String, u32)>>,
     }
 
     impl BrowserProcessHandler {
+        /// Builds the one shared `Client`/`InputQueryHandler` pair every
+        /// Window this process ever opens reuses, then opens every
+        /// startup View and its Windows — each one a real
+        /// `browser_host_create_browser` call via [`Kernel::open_view`]/
+        /// [`Kernel::open_window`], so this doesn't need to wait on any
+        /// page load the way the iframe-pane design (see the module doc
+        /// comment) needed to.
         fn on_context_initialized(&self) {
-            let window_state = Arc::new(Mutex::new(KernelWindowState {
-                browser_count: 0,
-                browser: None,
-            }));
-            let mut client = KernelClient::new(window_state.clone());
-            *self.client.borrow_mut() = Some(client.clone());
+            let client = KernelClient::new(self.kernel.clone());
 
             let router = BROWSER_ROUTER.get_or_init(|| BrowserSideRouter::new(message_router_config()));
             router.add_handler(
                 Arc::new(InputQueryHandler {
-                    bridge: self.input_bridge.clone(),
+                    bridge: self.kernel.bridge.clone(),
                 }),
                 false,
             );
 
-            let window_info = WindowInfo {
-                runtime_style: RuntimeStyle::ALLOY,
-                ..Default::default()
-            };
-            let settings = BrowserSettings::default();
-            let url = CefString::from(html_data_uri(&self.html).as_str());
+            self.kernel.bridge.lock().expect("input bridge lock poisoned").client = Some(client);
 
-            browser_host_create_browser(
-                Some(&window_info),
-                Some(&mut client),
-                Some(&url),
-                Some(&settings),
-                None,
-                None,
-            );
-
-            let mut poll_task = OutputPollTask::new(self.input_bridge.clone(), window_state);
-            post_delayed_task(ThreadId::UI, Some(&mut poll_task), POLL_INTERVAL_MS);
-        }
-    }
-}
-
-/// How often the poll loop checks for new PTY output and pushes it into
-/// the page. Short enough to feel live, long enough not to spin the UI
-/// thread — this is a placeholder until there's a real `rashomon:ui`
-/// primitive with its own event-driven update story.
-const POLL_INTERVAL_MS: i64 = 33;
-
-wrap_task! {
-    struct OutputPollTask {
-        bridge: Arc<Mutex<InputBridge>>,
-        window_state: Arc<Mutex<KernelWindowState>>,
-    }
-
-    impl Task {
-        /// Calls `terminal-xterm`'s `poll-output`, and if it drained any
-        /// new PTY bytes, pushes them into the already-loaded page via
-        /// `execute_java_script` — base64-encoded so arbitrary bytes
-        /// (quotes, control characters) survive being embedded in a JS
-        /// string literal without hand-rolled escaping, and decoded back
-        /// into a `Uint8Array` of the original bytes in JS (rather than
-        /// treating `atob`'s Latin1-per-byte string as the text
-        /// directly) so xterm.js still sees genuine UTF-8, not mangled
-        /// multi-byte characters. Always reschedules itself, whether or
-        /// not there was anything to push, so the loop keeps running for
-        /// the life of the window.
-        fn execute(&self) {
-            let browser = self
-                .window_state
-                .lock()
-                .expect("window state lock poisoned")
-                .browser
-                .clone();
-
-            if let Some(frame) = browser.and_then(|b| b.main_frame()) {
-                let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
-                let InputBridge { store, terminal_xterm_bindings } = &mut *bridge;
-                let output = terminal_xterm_bindings
-                    .rashomon_facet_contract()
-                    .call_poll_output(store);
-                drop(bridge);
-
-                if let Ok(output) = output {
-                    if !output.is_empty() {
-                        let b64 = CefString::from(&base64_encode(Some(output.as_bytes()))).to_string();
-                        let js = format!(
-                            "term.write(Uint8Array.from(atob('{b64}'), c => c.charCodeAt(0)));"
-                        );
-                        frame.execute_java_script(Some(&CefString::from(js.as_str())), None, 0);
+            for (node_id, facet_name, window_count) in self.initial_views.iter() {
+                let view_id = match self.kernel.open_view(node_id, facet_name) {
+                    Ok(view_id) => view_id,
+                    Err(e) => {
+                        eprintln!("failed to open initial view for {facet_name}: {e}");
+                        continue;
+                    }
+                };
+                for _ in 1..*window_count {
+                    if let Err(e) = self.kernel.open_window(&view_id) {
+                        eprintln!("failed to open mirror window for {facet_name}: {e}");
                     }
                 }
             }
-
-            let mut next = OutputPollTask::new(self.bridge.clone(), self.window_state.clone());
-            post_delayed_task(ThreadId::UI, Some(&mut next), POLL_INTERVAL_MS);
         }
     }
 }
@@ -628,16 +831,16 @@ wrap_render_process_handler! {
 
 wrap_app! {
     pub struct KernelApp {
-        html: Option<String>,
-        input_bridge: Option<Arc<Mutex<InputBridge>>>,
+        kernel: Option<Arc<Kernel>>,
+        initial_views: Option<Arc<Vec<(String, String, u32)>>>,
     }
 
     impl App {
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
-            let (Some(html), Some(input_bridge)) = (self.html.clone(), self.input_bridge.clone()) else {
+            let (Some(kernel), Some(initial_views)) = (self.kernel.clone(), self.initial_views.clone()) else {
                 return None;
             };
-            Some(KernelBrowserProcessHandler::new(RefCell::new(None), html, input_bridge))
+            Some(KernelBrowserProcessHandler::new(kernel, initial_views))
         }
 
         fn render_process_handler(&self) -> Option<RenderProcessHandler> {
@@ -646,21 +849,25 @@ wrap_app! {
     }
 }
 
-/// An `App` with no html/input_bridge yet — used for the initial
-/// `execute_process` dispatch by *both* binaries, before we know
-/// whether this invocation is the browser process (which gets a real
-/// `KernelApp` later, via [`run_browser_process`]) or a subprocess
-/// (for which this is the only `App` it will ever get, and the only
-/// thing that matters is that `render_process_handler()` still works
-/// without html/input_bridge, which it does).
+/// An `App` with no `Kernel` yet — used for the initial `execute_process`
+/// dispatch by *both* binaries, before we know whether this invocation is
+/// the browser process (which gets a real `KernelApp` later, via
+/// [`run_browser_process`]) or a subprocess (for which this is the only
+/// `App` it will ever get, and the only thing that matters is that
+/// `render_process_handler()` still works without a `Kernel`, which it
+/// does).
 pub fn make_minimal_app() -> App {
     KernelApp::new(None, None)
 }
 
 /// Everything that happens once we know this process is the CEF browser
-/// process: build/instantiate the demo Components (`ping`/`shell`/
-/// `terminal`/`terminal-xterm`), then hand off to CEF's own run loop.
-/// Blocks until the window is closed.
+/// process: run the one-shot `ping`/`shell`/`terminal` console demos
+/// (unchanged — console-only, never opened as Views), build a [`Kernel`]
+/// that knows how to open `terminal-xterm` Views, open one of them
+/// mirrored into two Windows (one `bash` session, two Windows watching
+/// it — see [`Kernel::open_window`]) to prove that side of the design,
+/// then hand off to CEF's own run loop. Blocks until every Window is
+/// closed.
 pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let ping_wasm_path = ensure_component_built("ping")?;
     let shell_wasm_path = ensure_component_built("shell")?;
@@ -735,9 +942,15 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         .map_err(|e| anyhow!("call to terminal's render() failed: {e}"))?;
     println!("terminal component rendered: {initial_screen:?}");
 
-    // `terminal-xterm`: same PTY, but the render() payload is an HTML
-    // document for `xterm.js` to run. CEF loads it below as the
-    // window's actual content.
+    // One Entity for the `terminal-xterm` View below — a single shell
+    // session, mirrored into two Windows (see `initial_views`), so it
+    // gets one `occurrence-of` target, not two.
+    let mirrored_thread = store
+        .data_mut()
+        .graph
+        .create_node("rashomon:thread", rashomon_graph::Role::Entity, Default::default())
+        .id;
+
     let terminal_xterm_component =
         Component::from_file(&engine, &terminal_xterm_wasm_path).map_err(|e| {
             anyhow!(
@@ -745,25 +958,35 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
                 terminal_xterm_wasm_path.display()
             )
         })?;
-    let terminal_xterm_bindings =
-        FacetWorld::instantiate(&mut store, &terminal_xterm_component, &linker)
-            .map_err(|e| anyhow!("failed to instantiate terminal-xterm component: {e}"))?;
-    let xterm_page = terminal_xterm_bindings
-        .rashomon_facet_contract()
-        .call_render(&mut store, &thread_id)
-        .map_err(|e| anyhow!("call to terminal-xterm's render() failed: {e}"))?;
-    println!("terminal-xterm component rendered {} bytes of HTML", xterm_page.len());
 
-    // `store` and `terminal_xterm_bindings` move into the input bridge
-    // here — real interactivity (`term.onData` -> `window.cefQuery` ->
-    // `handle-input`) reaches them through `InputQueryHandler` from now
-    // on, not through any further direct use in this function.
-    let input_bridge = Arc::new(Mutex::new(InputBridge {
+    let mut facets = HashMap::new();
+    facets.insert("terminal-xterm".to_string(), terminal_xterm_component);
+
+    // `store` moves into the bridge here — every further call into any
+    // Component's `render`/`handle-input`/`poll-output` goes through
+    // `Kernel::open_view` or `InputQueryHandler` from now on, not
+    // through any further direct use in this function.
+    let bridge = Arc::new(Mutex::new(InputBridge {
         store,
-        terminal_xterm_bindings,
+        client: None,
+        browser_count: 0,
+        views: HashMap::new(),
+        windows: HashMap::new(),
+        next_view_id: 0,
+        next_window_id: 0,
     }));
+    let kernel = Arc::new(Kernel {
+        facets: FacetRegistry { linker, components: facets },
+        bridge,
+    });
 
-    let mut app = KernelApp::new(Some(xterm_page), Some(input_bridge));
+    // One `terminal-xterm` View, mirrored into two Windows: typing in
+    // either reaches the same PTY, and output (including the PTY's own
+    // echo of that input) is fanned out to both — see `ViewHandle` and
+    // `Kernel::open_window`.
+    let initial_views = Arc::new(vec![(mirrored_thread, "terminal-xterm".to_string(), 2u32)]);
+
+    let mut app = KernelApp::new(Some(kernel), Some(initial_views));
     let settings = Settings {
         no_sandbox: 1,
         ..Default::default()
