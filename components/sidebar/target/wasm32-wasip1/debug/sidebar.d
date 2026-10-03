@@ -1,0 +1,1 @@
+/Users/aaratha/projects/rashomon/components/sidebar/target/wasm32-wasip1/debug/sidebar.wasm: /Users/aaratha/projects/rashomon/components/sidebar/src/bindings.rs /Users/aaratha/projects/rashomon/components/sidebar/src/lib.rs

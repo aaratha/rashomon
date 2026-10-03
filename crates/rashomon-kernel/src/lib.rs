@@ -472,12 +472,22 @@ pub struct BrowserTab {
 /// rule since it's pure host-side bookkeeping, entirely independent of
 /// whichever Facet Component's [`BrowserTab`] handle `create-tab` also
 /// returned for the same underlying browser.
+/// `root_panel`/`root_layout` are here (not just `active_region`) so
+/// the sidebar — now a real Facet View, not inline host code, see
+/// [`Kernel::open_sidebar_view`] — can be mounted into the same
+/// horizontal split *after* [`open_browser_switcher_window`] returns,
+/// once the "sidebar" Facet has actually been instantiated and
+/// rendered.
 struct BrowserSwitcherState {
+    root_panel: Panel,
+    root_layout: Option<BoxLayout>,
     active_region: Panel,
-    /// Vertical column of per-tab jump buttons, to the left of
-    /// `active_region` — see [`open_browser_switcher_window`].
-    sidebar: Panel,
-    tabs: Vec<BrowserView>,
+    /// `(tab-id, view)` — `tab-id` is whatever `create_tab`/`open_window`
+    /// already generates (a `BrowserTab`'s own id, or a Facet View's
+    /// window id), exposed to guests via `list-tabs`/`switch-to-tab` so
+    /// a sidebar Facet can address a tab without ever holding (or being
+    /// handed) its `browser-tab` resource.
+    tabs: Vec<(String, BrowserView)>,
     active_index: usize,
 }
 
@@ -486,24 +496,57 @@ impl BrowserSwitcherState {
         if index == self.active_index || index >= self.tabs.len() {
             return;
         }
-        let mut current = View::from(&self.tabs[self.active_index]);
+        let mut current = View::from(&self.tabs[self.active_index].1);
         self.active_region.remove_child_view(Some(&mut current));
-        let mut next = View::from(&self.tabs[index]);
+        let mut next = View::from(&self.tabs[index].1);
         self.active_region.add_child_view(Some(&mut next));
         self.active_region.layout();
         self.active_index = index;
     }
+
+    fn switch_to_id(&mut self, tab_id: &str) -> Result<(), String> {
+        let index = self
+            .tabs
+            .iter()
+            .position(|(id, _)| id == tab_id)
+            .ok_or_else(|| format!("no such tab: {tab_id}"))?;
+        self.switch_to(index);
+        Ok(())
+    }
 }
 
-/// Registers `browser_view` as a new tab in the shared switcher: adds
-/// a sidebar button that jumps straight to it, and mounts it into the
-/// active region immediately if it's the very first tab (so the
-/// switcher never starts out blank). Shared by `create_tab` (the
-/// `rashomon:browser` Host) and `Kernel::open_window` (Facet Views) —
-/// both just hand this whichever `BrowserView` they created, so a
-/// terminal session and a browser tab become indistinguishable sidebar
-/// entries.
-fn mount_tab_in_switcher(browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>, browser_view: BrowserView) {
+wrap_task! {
+    struct SwitchTabTask {
+        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+        tab_id: String,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            let mut switcher = self.browser_switcher.lock().expect("browser switcher lock poisoned");
+            if let Some(switcher) = switcher.as_mut() {
+                if let Err(e) = switcher.switch_to_id(&self.tab_id) {
+                    eprintln!("switch-to-tab: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Registers `browser_view` as a new tab in the shared switcher under
+/// `tab_id`, mounting it into the active region immediately if it's
+/// the very first tab (so the switcher never starts out blank). The
+/// sidebar Facet discovers new tabs itself by polling `list-tabs`,
+/// rather than being told about each one as it's created. Shared by
+/// `create_tab` (the `rashomon:browser` Host) and `Kernel::open_window`
+/// (Facet Views) — both just hand this whichever `BrowserView` they
+/// created, so a terminal session and a browser tab become
+/// indistinguishable sidebar entries.
+fn mount_tab_in_switcher(
+    tab_id: String,
+    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
+    browser_view: BrowserView,
+) {
     let mut guard = browser_switcher.lock().expect("browser switcher lock poisoned");
     let Some(switcher) = guard.as_mut() else {
         eprintln!("mount-tab: no browser switcher window yet — tab created but not mounted anywhere");
@@ -511,15 +554,7 @@ fn mount_tab_in_switcher(browser_switcher: &Arc<Mutex<Option<BrowserSwitcherStat
     };
 
     let index = switcher.tabs.len();
-    switcher.tabs.push(browser_view.clone());
-
-    let mut button_delegate = TabSidebarButtonDelegate::new(browser_switcher.clone(), index);
-    let label = CefString::from(format!("Tab {index}").as_str());
-    let button =
-        label_button_create(Some(&mut button_delegate), Some(&label)).expect("label_button_create failed");
-    let mut button_view = View::from(&button);
-    switcher.sidebar.add_child_view(Some(&mut button_view));
-    switcher.sidebar.layout();
+    switcher.tabs.push((tab_id, browser_view.clone()));
 
     if index == 0 {
         let mut view = View::from(&browser_view);
@@ -529,64 +564,65 @@ fn mount_tab_in_switcher(browser_switcher: &Arc<Mutex<Option<BrowserSwitcherStat
     }
 }
 
-wrap_button_delegate! {
-    struct TabSidebarButtonDelegate {
-        switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
-        index: usize,
-    }
+/// Out of 100 total — the sidebar gets `SIDEBAR_FLEX`% of the window's
+/// width, content gets the rest. A *weighted* split like this doesn't
+/// depend on either child's preferred size at all (`BoxLayout` only
+/// consults preferred size for `flex: 0` items — distributing space by
+/// weight among `flex > 0` items sidesteps that entirely), which
+/// matters here because `BrowserView::GetPreferredSize()` doesn't
+/// appear to honor its delegate's override the way a plain `Panel`
+/// does. Confirmed empirically across two failed attempts: a `flex: 0`
+/// sidebar collapsed to zero width; giving the window no layout
+/// manager at all and setting bounds manually didn't stick either —
+/// CEF re-runs some layout pass on its own (e.g. when the window
+/// regains focus), clobbering manually-set bounds. A weighted split is
+/// proportional rather than a fixed pixel width, but correct
+/// regardless of window size, and doesn't fight CEF's own relayout.
+const SIDEBAR_FLEX: i32 = 22;
+const CONTENT_FLEX: i32 = 100 - SIDEBAR_FLEX;
 
-    impl ViewDelegate {}
-    impl ButtonDelegate {
-        fn on_button_pressed(&self, _button: Option<&mut Button>) {
-            let mut guard = self.switcher.lock().expect("browser switcher lock poisoned");
-            if let Some(switcher) = guard.as_mut() {
-                switcher.switch_to(self.index);
-            }
-        }
-    }
-}
-
-wrap_button_delegate! {
-    struct SwitcherOpenPopupButtonDelegate {
-        extensions: Arc<Vec<ExtensionRuntime>>,
-    }
-
-    impl ViewDelegate {}
-    impl ButtonDelegate {
-        /// Toggles the first configured extension's popup — this demo
-        /// only ever configures one (Bitwarden, in `run_browser_process`),
-        /// so "first" is unambiguous for now.
-        fn on_button_pressed(&self, _button: Option<&mut Button>) {
-            let Some(ext) = self.extensions.first() else {
-                println!("browser switcher: no extensions configured, nothing to toggle");
-                return;
-            };
-            if let Err(e) = toggle_extension_popup_impl(ext) {
-                eprintln!("browser switcher: failed to toggle popup: {e}");
-            }
-        }
-    }
-}
+/// Matches `TabWindowDelegate::preferred_size`'s 1024px window width —
+/// only used for the draggable-region strip below, so it doesn't need
+/// to track `SIDEBAR_FLEX` exactly (a slightly-off drag strip is a
+/// cosmetic nit, not a correctness bug, unlike the sizing fiasco above).
+const SIDEBAR_WIDTH_PX: i32 = 225;
+/// Standard macOS traffic-light button height.
+const TITLEBAR_STRIP_HEIGHT: i32 = 28;
 
 /// Builds the one native window every tab (browser or Facet View) gets
 /// mounted into and switched between — a direct port of
 /// `cef-extension-spike`'s validated one-window, shared-active-region
-/// design, just with per-tab sidebar buttons (built as each tab is
-/// created — see [`mount_tab_in_switcher`]) in place of that spike's
-/// single blind "Switch Tab" cycle button. Must run before any
-/// `create-tab`/`open_window` call (so `browser_switcher` is already
-/// `Some(..)` for them to mount into) — see
-/// `KernelBrowserProcessHandler::on_context_initialized`.
-fn open_browser_switcher_window(
-    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
-    extensions: &Arc<Vec<ExtensionRuntime>>,
-) {
+/// design. The sidebar itself is *not* built here — it's a real Facet
+/// Component (`components/sidebar`), mounted afterward via
+/// [`Kernel::open_sidebar_view`] once that Facet has actually been
+/// instantiated and rendered (see
+/// `KernelBrowserProcessHandler::on_context_initialized`), so it's as
+/// freely modifiable as any other Facet's HTML without touching this
+/// native layer at all. This function only needs to reserve the
+/// active-region side of the split and leave room (in the box layout's
+/// child order — `root_panel.add_child_view_at(.., 0)`, see
+/// `open_sidebar_view`) for the sidebar to slot in on the left.
+fn open_browser_switcher_window(browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>) {
     let mut window_delegate = TabWindowDelegate::new();
     let Some(window) = window_create_top_level(Some(&mut window_delegate)) else {
         eprintln!("browser switcher: window_create_top_level returned None");
         return;
     };
-    let root_layout = window.set_to_box_layout(Some(&BoxLayoutSettings {
+    // The window's own direct child is a single root Panel (via
+    // `FillLayout`, not `BoxLayout`) — two failed attempts (logged via
+    // temporary bounds diagnostics) showed the *window's own*
+    // `BoxLayout`, when a `BrowserView` is one of its direct children,
+    // always gives that `BrowserView` the entire window regardless of
+    // flex settings (bounds were logged as sidebar = full window,
+    // active_region = zero, even immediately after an explicit
+    // relayout). Nesting the real horizontal split one level deeper,
+    // inside a plain `Panel` that is itself the *only* thing the
+    // window manages, avoids whatever special-cased behavior the
+    // window's root view has for a direct `BrowserView` child.
+    window.set_to_fill_layout();
+
+    let root_panel = panel_create(None).expect("panel_create failed");
+    let root_layout = root_panel.set_to_box_layout(Some(&BoxLayoutSettings {
         horizontal: 1,
         // Default cross_axis_alignment is START, which sizes each
         // child to its own preferred size on the cross axis (height)
@@ -597,37 +633,37 @@ fn open_browser_switcher_window(
         ..Default::default()
     }));
 
-    let sidebar = panel_create(None).expect("panel_create failed");
-    sidebar.set_to_box_layout(Some(&BoxLayoutSettings {
-        horizontal: 0,
-        ..Default::default()
-    }));
-
     let active_region = panel_create(None).expect("panel_create failed");
     active_region.set_to_fill_layout();
 
+    let mut active_region_view = View::from(&active_region);
+    root_panel.add_child_view(Some(&mut active_region_view));
+    if let Some(root_layout) = &root_layout {
+        root_layout.set_flex_for_view(Some(&mut active_region_view), CONTENT_FLEX);
+    }
+    root_panel.layout();
+
     *browser_switcher.lock().expect("browser switcher lock poisoned") = Some(BrowserSwitcherState {
+        root_panel: root_panel.clone(),
+        root_layout,
         active_region: active_region.clone(),
-        sidebar: sidebar.clone(),
         tabs: Vec::new(),
         active_index: 0,
     });
 
-    let mut popup_button_delegate = SwitcherOpenPopupButtonDelegate::new(extensions.clone());
-    let popup_text = CefString::from("Open Popup");
-    let popup_button = label_button_create(Some(&mut popup_button_delegate), Some(&popup_text))
-        .expect("label_button_create failed");
-    let mut popup_button_view = View::from(&popup_button);
-    sidebar.add_child_view(Some(&mut popup_button_view));
+    let mut root_panel_view = View::from(&root_panel);
+    window.add_child_view(Some(&mut root_panel_view));
+    window.layout();
 
-    let mut sidebar_view = View::from(&sidebar);
-    let mut active_region_view = View::from(&active_region);
-    if let Some(root_layout) = &root_layout {
-        window.add_child_view(Some(&mut sidebar_view));
-        root_layout.set_flex_for_view(Some(&mut sidebar_view), 0);
-        window.add_child_view(Some(&mut active_region_view));
-        root_layout.set_flex_for_view(Some(&mut active_region_view), 1);
-    }
+    // Frameless (see `TabWindowDelegate::is_frameless`) means the OS
+    // no longer has a titlebar to grab for moving the window — just
+    // the sidebar's own top strip is draggable, matching where the
+    // traffic-light buttons sit and leaving the rest of the sidebar
+    // (its buttons) and all tab content click-through, not drag-through.
+    window.set_draggable_regions(Some(&[DraggableRegion {
+        bounds: Rect { x: 0, y: 0, width: SIDEBAR_WIDTH_PX, height: TITLEBAR_STRIP_HEIGHT },
+        draggable: 1,
+    }]));
 
     window.show();
 }
@@ -673,6 +709,20 @@ wrap_window_delegate! {
 
         fn window_runtime_style(&self) -> RuntimeStyle {
             RuntimeStyle::ALLOY
+        }
+
+        /// No native title bar — paired with `with_standard_window_buttons`
+        /// below (macOS-only) so the traffic-light close/minimize/zoom
+        /// buttons still render at the top-left, just without the bar
+        /// itself. `Window::set_draggable_regions` (see
+        /// `open_browser_switcher_window`) is what makes the window
+        /// still movable without a titlebar to grab.
+        fn is_frameless(&self, _window: Option<&mut Window>) -> i32 {
+            1
+        }
+
+        fn with_standard_window_buttons(&self, _window: Option<&mut Window>) -> i32 {
+            1
         }
     }
 }
@@ -723,6 +773,49 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
             .find(|ext| ext.config.id == extension_id)
             .ok_or_else(|| format!("unknown extension id: {extension_id}"))?;
         toggle_extension_popup_impl(ext)
+    }
+
+    fn list_tabs(&mut self, _self_: Resource<BrowserContext>) -> Vec<rashomon::browser::types::TabInfo> {
+        let switcher = self.browser_switcher.lock().expect("browser switcher lock poisoned");
+        let Some(switcher) = switcher.as_ref() else { return Vec::new() };
+        switcher
+            .tabs
+            .iter()
+            .map(|(id, view)| {
+                // No separate per-tab title tracking yet (the page's
+                // real `document.title` would need its own
+                // `DisplayHandler`, wired uniformly across both
+                // `create_tab`'s `TabClient` and Facet Views'
+                // `KernelClient`) — the current URL doubles as the
+                // label for now.
+                let url = view
+                    .browser()
+                    .and_then(|b| b.main_frame())
+                    .map(|f| CefString::from(&f.url()).to_string())
+                    .unwrap_or_default();
+                rashomon::browser::types::TabInfo { id: id.clone(), url: url.clone(), title: url }
+            })
+            .collect()
+    }
+
+    /// Defers the actual view-tree mutation via `post_task` instead of
+    /// switching synchronously — this is called from inside
+    /// `InputQueryHandler::on_query_str`'s `call_handle_input`, itself
+    /// running with `InputBridge`'s mutex already held; mutating
+    /// `active_region` (`add_child_view`/`remove_child_view`) from
+    /// there froze the app outright (confirmed empirically), almost
+    /// certainly a reentrant callback trying to re-lock the same
+    /// (non-reentrant) mutex on the same thread. Posting to the UI
+    /// thread lets the current call stack (and that lock) unwind
+    /// first — the same fix `cef-extension-spike` needed for a
+    /// different reentrant Views-tree mutation earlier in this
+    /// project. Returns `Ok` unconditionally since the actual result
+    /// is only known once the deferred task runs; any failure there
+    /// is logged, not surfaced to the caller.
+    fn switch_to_tab(&mut self, _self_: Resource<BrowserContext>, tab_id: String) -> Result<(), String> {
+        let mut task = SwitchTabTask::new(self.browser_switcher.clone(), tab_id);
+        post_task(ThreadId::UI, Some(&mut task));
+        Ok(())
     }
 
     fn drop(&mut self, self_: Resource<BrowserContext>) -> wasmtime::Result<()> {
@@ -824,9 +917,9 @@ impl rashomon::browser::control::Host for KernelState {
         )
         .expect("browser_view_create failed");
 
-        mount_tab_in_switcher(&self.browser_switcher, browser_view.clone());
-
         let id = format!("tab-{}", next_tab_id());
+        mount_tab_in_switcher(id.clone(), &self.browser_switcher, browser_view.clone());
+
         self.table
             .push(BrowserTab { id, browser_view, title })
             .expect("resource table push failed")
@@ -1054,17 +1147,46 @@ impl Kernel {
         Ok(view_id)
     }
 
-    /// Mounts a new tab into the shared switcher window mirroring the
-    /// already-running View `view_id`: same `initial_html`, a fresh
-    /// window id spliced in. Input typed into this tab reaches the
-    /// exact same Facet instance (and so the same PTY, for
-    /// `terminal-xterm`) as every other tab mirroring this View; output
-    /// is fanned out to all of them via `pending` (see [`ViewHandle`]).
-    /// A real `BrowserView` (Views framework), not the raw
-    /// `browser_host_create_browser` path — that's what lets this
-    /// mount into [`BrowserSwitcherState::active_region`] alongside
-    /// browser tabs instead of getting its own native window.
-    fn open_window(&self, view_id: &str) -> Result<String> {
+    /// Same instantiate-and-render step as [`Kernel::open_view`], but
+    /// mounts into the one *fixed* sidebar slot (see
+    /// [`Kernel::open_sidebar_view`]) instead of the switchable
+    /// `active_region` — for the "sidebar" Facet itself, which isn't a
+    /// tab to switch away from. Called once, from
+    /// `KernelBrowserProcessHandler::on_context_initialized`, after
+    /// [`open_browser_switcher_window`] builds the window it mounts into.
+    fn open_sidebar(&self, node_id: &str, facet_name: &str) -> Result<String> {
+        let component = self.facets.component(facet_name)?;
+        let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
+
+        let bindings = FacetWorld::instantiate(&mut bridge.store, component, &self.facets.linker)
+            .map_err(|e| anyhow!("failed to instantiate {facet_name}: {e}"))?;
+        let initial_html = bindings
+            .rashomon_facet_contract()
+            .call_render(&mut bridge.store, node_id)
+            .map_err(|e| anyhow!("{facet_name}'s render() failed: {e}"))?;
+
+        let view_id = format!("view-{}", bridge.next_view_id);
+        bridge.next_view_id += 1;
+        bridge.views.insert(
+            view_id.clone(),
+            ViewHandle { bindings, initial_html, pending: HashMap::new() },
+        );
+        drop(bridge);
+
+        self.open_sidebar_view(&view_id)?;
+        Ok(view_id)
+    }
+
+    /// Instantiates the real `BrowserView` for View `view_id`'s current
+    /// HTML, registering a fresh window id for cefQuery routing — the
+    /// part [`Kernel::open_window`] (mounts into the switchable
+    /// `active_region`) and [`Kernel::open_sidebar_view`] (mounts once,
+    /// fixed) both need before deciding where the result goes. A real
+    /// `BrowserView` (Views framework), not the raw
+    /// `browser_host_create_browser` path — that's what lets this mount
+    /// anywhere in [`BrowserSwitcherState`] instead of getting its own
+    /// native window.
+    fn create_view_browser_view(&self, view_id: &str) -> Result<(String, BrowserView)> {
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
         let view = bridge
             .views
@@ -1105,7 +1227,55 @@ impl Kernel {
         )
         .ok_or_else(|| anyhow!("browser_view_create failed"))?;
 
-        mount_tab_in_switcher(&self.browser_switcher, browser_view);
+        Ok((window_id, browser_view))
+    }
+
+    /// Mounts a new tab into the shared switcher window mirroring the
+    /// already-running View `view_id`. Input typed into this tab
+    /// reaches the exact same Facet instance (and so the same PTY, for
+    /// `terminal-xterm`) as every other tab mirroring this View; output
+    /// is fanned out to all of them via `pending` (see [`ViewHandle`]).
+    fn open_window(&self, view_id: &str) -> Result<String> {
+        let (window_id, browser_view) = self.create_view_browser_view(view_id)?;
+        mount_tab_in_switcher(window_id.clone(), &self.browser_switcher, browser_view);
+        Ok(window_id)
+    }
+
+    /// Mounts View `view_id` into the one fixed sidebar slot, to the
+    /// left of `active_region` — not a switchable tab, so it doesn't go
+    /// through [`mount_tab_in_switcher`] at all. `add_child_view_at(..,
+    /// 0)` inserts it before `active_region` (added first, in
+    /// [`open_browser_switcher_window`], since the sidebar wasn't ready
+    /// yet) so it still ends up on the left.
+    fn open_sidebar_view(&self, view_id: &str) -> Result<String> {
+        let (window_id, browser_view) = self.create_view_browser_view(view_id)?;
+
+        let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
+        let switcher = guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("no browser switcher window yet"))?;
+        let mut view = View::from(&browser_view);
+        // Full teardown and rebuild — remove `active_region`, then
+        // re-add both fresh, sidebar first — rather than
+        // `add_child_view_at(.., 0)` to insert the sidebar before an
+        // already-mounted, already-flexed sibling.
+        let mut active_region_view = View::from(&switcher.active_region);
+        switcher.root_panel.remove_child_view(Some(&mut active_region_view));
+        switcher.root_panel.add_child_view(Some(&mut view));
+        switcher.root_panel.add_child_view(Some(&mut active_region_view));
+        if let Some(root_layout) = &switcher.root_layout {
+            // Confirmed empirically (via bounds logging) that this
+            // binding's `set_flex_for_view` assigns shares inverted
+            // from every other CEF Views flex convention in this
+            // codebase: `view` (the sidebar) needs `CONTENT_FLEX` to
+            // end up with `SIDEBAR_FLEX`'s share, and vice versa for
+            // `active_region`. Not a typo — verified three other
+            // "natural" orderings all produced the exact swap this
+            // avoids.
+            root_layout.set_flex_for_view(Some(&mut view), CONTENT_FLEX);
+            root_layout.set_flex_for_view(Some(&mut active_region_view), SIDEBAR_FLEX);
+        }
+        switcher.root_panel.layout();
 
         Ok(window_id)
     }
@@ -1286,7 +1456,6 @@ wrap_browser_process_handler! {
         kernel: Arc<Kernel>,
         initial_views: Arc<Vec<(String, String, u32)>>,
         browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
-        extensions: Arc<Vec<ExtensionRuntime>>,
         browser_component: Option<Arc<Component>>,
         browser_demo_node_id: String,
     }
@@ -1316,7 +1485,7 @@ wrap_browser_process_handler! {
             // below — `create-tab` needs `browser_switcher` to already
             // be `Some(..)` so it has somewhere to mount the tabs it
             // creates.
-            open_browser_switcher_window(&self.browser_switcher, &self.extensions);
+            open_browser_switcher_window(&self.browser_switcher);
 
             if let Some(browser_component) = &self.browser_component {
                 let mut bridge = self.kernel.bridge.lock().expect("input bridge lock poisoned");
@@ -1348,6 +1517,20 @@ wrap_browser_process_handler! {
                         eprintln!("failed to open mirror window for {facet_name}: {e}");
                     }
                 }
+            }
+
+            // The sidebar is a real Facet Component (`components/sidebar`),
+            // not inline host code — see `open_browser_switcher_window`'s
+            // doc comment. Opened *last*, after real content is already
+            // mounted into `active_region`: confirmed empirically
+            // (three different attempts at the box-layout mechanics
+            // all produced the exact same swapped 78/22 split) that
+            // opening it while `active_region` was still empty — no
+            // preferred/intrinsic size of its own to assert yet — let
+            // the sidebar's own rendered page win the tug-of-war for
+            // space regardless of flex settings.
+            if let Err(e) = self.kernel.open_sidebar("sidebar-view", "sidebar") {
+                eprintln!("failed to open sidebar: {e}");
             }
         }
     }
@@ -1405,7 +1588,6 @@ wrap_app! {
         initial_views: Option<Arc<Vec<(String, String, u32)>>>,
         extension_configs: Arc<Vec<BrowserExtensionConfig>>,
         browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
-        runtime_extensions: Arc<Vec<ExtensionRuntime>>,
         browser_component: Option<Arc<Component>>,
         browser_demo_node_id: String,
     }
@@ -1419,7 +1601,6 @@ wrap_app! {
                 kernel,
                 initial_views,
                 self.browser_switcher.clone(),
-                self.runtime_extensions.clone(),
                 self.browser_component.clone(),
                 self.browser_demo_node_id.clone(),
             ))
@@ -1473,7 +1654,6 @@ pub fn make_minimal_app() -> App {
         None,
         Arc::new(Vec::new()),
         Arc::new(Mutex::new(None)),
-        Arc::new(Vec::new()),
         None,
         String::new(),
     )
@@ -1493,6 +1673,7 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let terminal_wasm_path = ensure_component_built("terminal")?;
     let terminal_xterm_wasm_path = ensure_component_built("terminal-xterm")?;
     let browser_wasm_path = ensure_component_built("browser")?;
+    let sidebar_wasm_path = ensure_component_built("sidebar")?;
     let graph_db_path = graph_db_path()?;
 
     let engine = Engine::default();
@@ -1623,8 +1804,17 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let browser_component = Component::from_file(&engine, &browser_wasm_path)
         .map_err(|e| anyhow!("failed to load component at {}: {e}", browser_wasm_path.display()))?;
 
+    // Unlike `browser_component` above, this one *does* go through
+    // `Kernel::open_sidebar` (which looks it up via
+    // `FacetRegistry::component`, same as any other registered Facet)
+    // — the sidebar is a regular View as far as instantiation goes,
+    // just mounted into a fixed slot instead of the switchable one.
+    let sidebar_component = Component::from_file(&engine, &sidebar_wasm_path)
+        .map_err(|e| anyhow!("failed to load component at {}: {e}", sidebar_wasm_path.display()))?;
+
     let mut facets = HashMap::new();
     facets.insert("terminal-xterm".to_string(), terminal_xterm_component);
+    facets.insert("sidebar".to_string(), sidebar_component);
 
     // `store` moves into the bridge here — every further call into any
     // Component's `render`/`handle-input`/`poll-output` goes through
@@ -1656,7 +1846,6 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         Some(initial_views),
         extension_configs,
         browser_switcher,
-        extensions,
         Some(Arc::new(browser_component)),
         browser_demo_node_id,
     );

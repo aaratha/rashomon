@@ -41,6 +41,23 @@ interface types {
         /// design has) or navigating an *existing* tab to that URL
         /// (blocked outright by Chrome's extension-popup guard).
         toggle-extension-popup: func(extension-id: string) -> result<_, string>;
+
+        /// Data only, never a `browser-tab` handle — see the `control`
+        /// interface's own doc comment for why handing out a second
+        /// owning handle to the same tab isn't sound. This is exactly
+        /// what a sidebar Facet needs to render a tab list: enough to
+        /// show and pick a tab, not enough to control it directly
+        /// (that still requires having created it via `create-tab` and
+        /// kept the handle).
+        list-tabs: func() -> list<tab-info>;
+
+        /// Mounts the given tab (by the id `tab-info.id` names) into
+        /// the host's one shared active-region panel, unmounting
+        /// whichever tab was there before — the same swap
+        /// `cef-extension-spike` validated, just driven by a sidebar
+        /// Facet's `switch-tab:<id>` button instead of a native
+        /// click handler.
+        switch-to-tab: func(tab-id: string) -> result<_, string>;
     }
 
     /// Enough for a sidebar to render one icon per installed
@@ -51,6 +68,15 @@ interface types {
         id: string,
         name: string,
         popup-open: bool,
+    }
+
+    /// Enough for a sidebar to render a tab list and request a switch
+    /// by id — see `browser-context.list-tabs`'s own doc comment for
+    /// why this is metadata, not a `browser-tab` handle.
+    record tab-info {
+        id: string,
+        url: string,
+        title: string,
     }
 
     resource browser-tab {
@@ -72,15 +98,14 @@ interface types {
 /// where that isn't true, but every call during this pass is expected
 /// to reuse the one made at kernel startup, not make a second one.
 ///
-/// Deliberately no `list-tabs`/`get-tab` here: a `browser-tab` is an
-/// *owned* resource handle, and the Component Model has no sound way
-/// to hand out a second owning handle to the same one (every owner
-/// dropping its handle tries to destroy the same underlying browser).
-/// The Facet Component that calls `create-tab` keeps whichever handles
-/// it creates for as long as it needs them; a shared, cross-instance
-/// tab *registry* (for a tab-switcher UI, say) is a real but separate
-/// need, better designed alongside the actual switching mechanics (see
-/// the task that adds sleep/swap to the Kernel) than speculatively here.
+/// No `get-tab` here, deliberately: a `browser-tab` is an *owned*
+/// resource handle, and the Component Model has no sound way to hand
+/// out a second owning handle to the same one (every owner dropping
+/// its handle tries to destroy the same underlying browser). A sidebar
+/// Facet that needs to show/switch tabs it didn't create itself uses
+/// `browser-context.list-tabs`/`switch-to-tab` instead (data and an
+/// id-addressed action, never a handle) — designed alongside the real
+/// switching mechanics in the Kernel, not speculatively.
 interface control {
     use types.{browser-context, browser-tab};
 
