@@ -11,42 +11,40 @@
 //! just the raw HTML string a Facet's `render` returns — but opening a
 //! View is no longer one hardcoded Facet filling one hardcoded page.
 //! [`Kernel::open_view`] can instantiate any registered Facet against
-//! any Entity and give it its own top-level CEF Window (one real
-//! `browser_host_create_browser` call per View, all sharing one
-//! `Client`/`InputQueryHandler`/`Store` via [`InputBridge`]), which is
-//! not what was originally planned here.
+//! any Entity and mount it as a tab in the one shared switcher window
+//! every View and every `rashomon:browser` tab lives in (see
+//! [`open_browser_switcher_window`]/[`BrowserSwitcherState`]), all
+//! sharing one `Client`/`InputQueryHandler`/`Store` via [`InputBridge`].
 //!
-//! **Why not one Window with multiple Views as panes:** the first
-//! attempt loaded a single shell page and inserted each View as an
-//! `<iframe srcdoc>` pane via `execute_java_script`. Two separate bugs
-//! showed up chasing that down, both confirmed empirically rather than
-//! assumed: (1) `execute_java_script` silently does nothing when called
-//! from a CEF `Task` (e.g. one scheduled via `post_delayed_task`) —
-//! identical script, called from a genuine Client/Handler callback like
-//! `on_load_end`, ran and logged; called from `Task::execute()`,
-//! returned normally but never actually ran. That one's dodged below by
-//! routing output through the same `cefQuery` round trip input already
-//! uses ([`POLL_REQUEST`]) instead of a host-side push loop. (2) More
-//! fundamentally, dynamically-created `<iframe srcdoc>` elements never
-//! finished navigating in this CEF/Alloy configuration at all — not
-//! even a fully offline, dependency-free one, and not even one declared
-//! statically in the page's own initial HTML (which additionally
-//! blocked the *parent* page's own `on_load_end` from ever firing, since
-//! that normally waits on all initial subresources). Real multi-pane
-//! support belongs to native child-view embedding (`WindowInfo`'s
-//! `parent_view`/`bounds`, the same mechanism `cefclient`'s own
-//! multi-pane UI uses) instead of HTML iframes — a real enough chunk of
-//! per-platform work that it's deliberately left as the next concrete
-//! step, not something to half-do here.
+//! **Why one window, with real native panes, not an iframe-pane HTML
+//! shell:** the first attempt loaded a single shell page and inserted
+//! each View as an `<iframe srcdoc>` pane via `execute_java_script`.
+//! Two separate bugs showed up chasing that down, both confirmed
+//! empirically rather than assumed: (1) `execute_java_script` silently
+//! does nothing when called from a CEF `Task` (e.g. one scheduled via
+//! `post_delayed_task`) — identical script, called from a genuine
+//! Client/Handler callback like `on_load_end`, ran and logged; called
+//! from `Task::execute()`, returned normally but never actually ran.
+//! That one's dodged below by routing output through the same
+//! `cefQuery` round trip input already uses ([`POLL_REQUEST`]) instead
+//! of a host-side push loop. (2) More fundamentally, dynamically-created
+//! `<iframe srcdoc>` elements never finished navigating in this
+//! CEF/Alloy configuration at all. Real multi-pane support turned out to
+//! belong to native child-view embedding instead of HTML iframes — each
+//! View/tab is a real Views-framework `BrowserView` (see `create_tab`,
+//! `Kernel::open_window`), mounted into one shared, swappable panel
+//! (`BrowserSwitcherState::active_region`) exactly the way
+//! `crates/cef-extension-spike` validated it, rather than embedded via
+//! HTML at all.
 //!
-//! Input flows back via a CEF message-router bridge: each Window's page
+//! Input flows back via a CEF message-router bridge: each tab's page
 //! prefixes its `window.cefQuery` calls with its own window id, so one
 //! shared [`InputQueryHandler`] can route a keystroke (or a
 //! [`POLL_REQUEST`]) to the right View's `handle-input` (or
-//! `poll-output`) rather than there being one handler per Window. More
-//! than one Window can mirror the same View this way — see
-//! [`Kernel::open_window`] — with output fanned out so no mirroring
-//! Window loses it to whichever one happens to poll first. Every
+//! `poll-output`) rather than there being one handler per tab. More
+//! than one tab can mirror the same View this way — see
+//! [`Kernel::open_window`] — with output fanned out so no mirroring tab
+//! loses it to whichever one happens to poll first. Every
 //! primitive is backed by a real host
 //! implementation — `rashomon:graph` by a `PersistentGraphStore` (so
 //! the graph survives a restart), and `rashomon:process` by a real PTY
@@ -88,6 +86,8 @@ wasmtime::component::bindgen!({
     world: "facet-world",
     with: {
         "rashomon:process/types.process": SpawnedProcess,
+        "rashomon:browser/types.browser-context": BrowserContext,
+        "rashomon:browser/types.browser-tab": BrowserTab,
     },
 });
 
@@ -101,6 +101,15 @@ struct KernelState {
     graph: rashomon_graph::PersistentGraphStore,
     wasi_ctx: WasiCtx,
     table: ResourceTable,
+    /// The extensions this process loaded at startup (see
+    /// [`BrowserExtensionConfig`]) — empty until a real extension-
+    /// configuration system exists.
+    extensions: Arc<Vec<ExtensionRuntime>>,
+    /// `None` until [`open_browser_switcher_window`] builds the one
+    /// native window every tab gets mounted into — `create_tab` must
+    /// never be called before that happens (see
+    /// `KernelBrowserProcessHandler::on_context_initialized`).
+    browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
 }
 
 impl WasiView for KernelState {
@@ -309,6 +318,531 @@ impl rashomon::process::spawner::Host for KernelState {
     }
 }
 
+/// One extension the kernel was configured to load via
+/// `--load-extension` at startup (see
+/// `KernelApp::on_before_command_line_processing`) — settled by
+/// hands-on CEF spiking in `cef-extension-spike`: CEF's own dynamic,
+/// per-context extension-loading embedder API was removed around the
+/// versions this project targets, so the command-line switch at
+/// process startup is the only way left to load one at all. There's no
+/// persisted extension-configuration system yet, so `run_browser_process`
+/// currently passes an empty list — this struct and the plumbing around
+/// it are real, just unpopulated until that system exists.
+#[derive(Clone)]
+pub struct BrowserExtensionConfig {
+    pub path: PathBuf,
+    /// Fixed by the `key` field in the extension's own `manifest.json`
+    /// (every extension that expects to be loaded this way needs one,
+    /// or `--load-extension` derives an id from its path instead,
+    /// which isn't stable enough to hardcode here).
+    pub id: String,
+    pub name: String,
+    /// Relative to the extension's root — from its own
+    /// `manifest.json`'s `action.default_popup`, e.g.
+    /// `"popup/index.html"` for Bitwarden.
+    pub popup_page: String,
+}
+
+/// Tracks one extension's popup lifecycle. `Opening` exists because
+/// `browser_host_create_browser` doesn't create the `Browser`
+/// synchronously (`on_after_created` fires later) — without it,
+/// `toggle_extension_popup` called twice in quick succession would see
+/// "nothing open yet" both times and open two popups instead of
+/// open-then-close. Ported directly from the design proven in
+/// `cef-extension-spike`.
+enum PopupState {
+    Closed,
+    Opening,
+    Open(i32, Browser),
+}
+
+struct ExtensionRuntime {
+    config: BrowserExtensionConfig,
+    popup: Arc<Mutex<PopupState>>,
+}
+
+wrap_life_span_handler! {
+    struct ExtensionPopupLifeSpanHandler {
+        tracked: Arc<Mutex<PopupState>>,
+    }
+
+    impl LifeSpanHandler {
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            let Some(browser) = browser else { return };
+            let id = browser.identifier();
+            *self.tracked.lock().expect("popup lock poisoned") = PopupState::Open(id, browser.clone());
+        }
+
+        /// Only clears to `Closed` if this is still the browser the
+        /// shared state thinks is open — if the popup was already
+        /// closed and reopened before this particular close finishes
+        /// landing, this must not clobber that newer state.
+        fn on_before_close(&self, browser: Option<&mut Browser>) {
+            let Some(browser) = browser else { return };
+            let closing_id = browser.identifier();
+            let mut state = self.tracked.lock().expect("popup lock poisoned");
+            if let PopupState::Open(open_id, _) = &*state {
+                if *open_id == closing_id {
+                    *state = PopupState::Closed;
+                }
+            }
+        }
+    }
+}
+
+wrap_client! {
+    struct ExtensionPopupClient {
+        tracked: Arc<Mutex<PopupState>>,
+    }
+
+    impl Client {
+        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
+            Some(ExtensionPopupLifeSpanHandler::new(self.tracked.clone()))
+        }
+    }
+}
+
+/// Shared by `HostBrowserContext::toggle_extension_popup` (the WIT-facing
+/// path, called from a Facet Component) and `SwitcherOpenPopupButtonDelegate`
+/// (the native "Open Popup" button on the browser switcher window built
+/// by [`open_browser_switcher_window`]) — both reproduce the exact
+/// open/close-race-safe toggle `cef-extension-spike` validated, via this
+/// one function, rather than two parallel copies of the same logic.
+fn toggle_extension_popup_impl(ext: &ExtensionRuntime) -> Result<(), String> {
+    let mut state = ext.popup.lock().expect("popup lock poisoned");
+    match &*state {
+        PopupState::Open(_, browser) => {
+            let browser = browser.clone();
+            *state = PopupState::Closed;
+            drop(state);
+            if let Some(host) = browser.host() {
+                host.close_browser(1);
+            }
+            Ok(())
+        }
+        PopupState::Opening => Err("popup already opening".to_string()),
+        PopupState::Closed => {
+            *state = PopupState::Opening;
+            drop(state);
+            let mut popup_client = ExtensionPopupClient::new(ext.popup.clone());
+            let window_info = WindowInfo {
+                runtime_style: RuntimeStyle::ALLOY,
+                ..Default::default()
+            };
+            let settings = BrowserSettings::default();
+            let url = CefString::from(
+                format!("chrome-extension://{}/{}", ext.config.id, ext.config.popup_page).as_str(),
+            );
+            browser_host_create_browser(
+                Some(&window_info),
+                Some(&mut popup_client),
+                Some(&url),
+                Some(&settings),
+                None,
+                None,
+            );
+            Ok(())
+        }
+    }
+}
+
+/// There's exactly one of these for now — the kernel's one user
+/// profile (see the WIT doc comment on `browser-context`).
+pub struct BrowserContext {
+    id: String,
+}
+
+/// A real `RuntimeStyle::ALLOY` `BrowserView` — never in its own
+/// dedicated window. `create_tab` mounts every tab's `BrowserView` into
+/// the one shared, swappable active-region panel
+/// [`open_browser_switcher_window`] builds (Alloy-style BrowserViews,
+/// unlike Chrome-style ones, have no "only one per window" restriction
+/// — confirmed in `cef-extension-spike`), the same one-window design
+/// that spike's tab-switching + popup-toggle behavior validated.
+pub struct BrowserTab {
+    id: String,
+    browser_view: BrowserView,
+    title: Arc<Mutex<String>>,
+}
+
+/// One tab mounted or mountable into [`BrowserSwitcherState::active_region`]
+/// — a cheap `BrowserView` clone (Views-framework handles are cheap to
+/// duplicate; CEF's own `BrowserHost`/`Browser` stays singular either
+/// way). This doesn't fight the WIT `browser-tab` resource's single-owner
+/// rule since it's pure host-side bookkeeping, entirely independent of
+/// whichever Facet Component's [`BrowserTab`] handle `create-tab` also
+/// returned for the same underlying browser.
+struct BrowserSwitcherState {
+    active_region: Panel,
+    /// Vertical column of per-tab jump buttons, to the left of
+    /// `active_region` — see [`open_browser_switcher_window`].
+    sidebar: Panel,
+    tabs: Vec<BrowserView>,
+    active_index: usize,
+}
+
+impl BrowserSwitcherState {
+    fn switch_to(&mut self, index: usize) {
+        if index == self.active_index || index >= self.tabs.len() {
+            return;
+        }
+        let mut current = View::from(&self.tabs[self.active_index]);
+        self.active_region.remove_child_view(Some(&mut current));
+        let mut next = View::from(&self.tabs[index]);
+        self.active_region.add_child_view(Some(&mut next));
+        self.active_region.layout();
+        self.active_index = index;
+    }
+}
+
+/// Registers `browser_view` as a new tab in the shared switcher: adds
+/// a sidebar button that jumps straight to it, and mounts it into the
+/// active region immediately if it's the very first tab (so the
+/// switcher never starts out blank). Shared by `create_tab` (the
+/// `rashomon:browser` Host) and `Kernel::open_window` (Facet Views) —
+/// both just hand this whichever `BrowserView` they created, so a
+/// terminal session and a browser tab become indistinguishable sidebar
+/// entries.
+fn mount_tab_in_switcher(browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>, browser_view: BrowserView) {
+    let mut guard = browser_switcher.lock().expect("browser switcher lock poisoned");
+    let Some(switcher) = guard.as_mut() else {
+        eprintln!("mount-tab: no browser switcher window yet — tab created but not mounted anywhere");
+        return;
+    };
+
+    let index = switcher.tabs.len();
+    switcher.tabs.push(browser_view.clone());
+
+    let mut button_delegate = TabSidebarButtonDelegate::new(browser_switcher.clone(), index);
+    let label = CefString::from(format!("Tab {index}").as_str());
+    let button =
+        label_button_create(Some(&mut button_delegate), Some(&label)).expect("label_button_create failed");
+    let mut button_view = View::from(&button);
+    switcher.sidebar.add_child_view(Some(&mut button_view));
+    switcher.sidebar.layout();
+
+    if index == 0 {
+        let mut view = View::from(&browser_view);
+        switcher.active_region.add_child_view(Some(&mut view));
+        switcher.active_region.layout();
+        switcher.active_index = 0;
+    }
+}
+
+wrap_button_delegate! {
+    struct TabSidebarButtonDelegate {
+        switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+        index: usize,
+    }
+
+    impl ViewDelegate {}
+    impl ButtonDelegate {
+        fn on_button_pressed(&self, _button: Option<&mut Button>) {
+            let mut guard = self.switcher.lock().expect("browser switcher lock poisoned");
+            if let Some(switcher) = guard.as_mut() {
+                switcher.switch_to(self.index);
+            }
+        }
+    }
+}
+
+wrap_button_delegate! {
+    struct SwitcherOpenPopupButtonDelegate {
+        extensions: Arc<Vec<ExtensionRuntime>>,
+    }
+
+    impl ViewDelegate {}
+    impl ButtonDelegate {
+        /// Toggles the first configured extension's popup — this demo
+        /// only ever configures one (Bitwarden, in `run_browser_process`),
+        /// so "first" is unambiguous for now.
+        fn on_button_pressed(&self, _button: Option<&mut Button>) {
+            let Some(ext) = self.extensions.first() else {
+                println!("browser switcher: no extensions configured, nothing to toggle");
+                return;
+            };
+            if let Err(e) = toggle_extension_popup_impl(ext) {
+                eprintln!("browser switcher: failed to toggle popup: {e}");
+            }
+        }
+    }
+}
+
+/// Builds the one native window every tab (browser or Facet View) gets
+/// mounted into and switched between — a direct port of
+/// `cef-extension-spike`'s validated one-window, shared-active-region
+/// design, just with per-tab sidebar buttons (built as each tab is
+/// created — see [`mount_tab_in_switcher`]) in place of that spike's
+/// single blind "Switch Tab" cycle button. Must run before any
+/// `create-tab`/`open_window` call (so `browser_switcher` is already
+/// `Some(..)` for them to mount into) — see
+/// `KernelBrowserProcessHandler::on_context_initialized`.
+fn open_browser_switcher_window(
+    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
+    extensions: &Arc<Vec<ExtensionRuntime>>,
+) {
+    let mut window_delegate = TabWindowDelegate::new();
+    let Some(window) = window_create_top_level(Some(&mut window_delegate)) else {
+        eprintln!("browser switcher: window_create_top_level returned None");
+        return;
+    };
+    let root_layout = window.set_to_box_layout(Some(&BoxLayoutSettings {
+        horizontal: 1,
+        // Default cross_axis_alignment is START, which sizes each
+        // child to its own preferred size on the cross axis (height)
+        // rather than filling the window — without this, the sidebar
+        // and active-region panel (and its BrowserViews) collapse to
+        // zero height. See `cef-extension-spike`'s identical fix.
+        cross_axis_alignment: AxisAlignment::STRETCH,
+        ..Default::default()
+    }));
+
+    let sidebar = panel_create(None).expect("panel_create failed");
+    sidebar.set_to_box_layout(Some(&BoxLayoutSettings {
+        horizontal: 0,
+        ..Default::default()
+    }));
+
+    let active_region = panel_create(None).expect("panel_create failed");
+    active_region.set_to_fill_layout();
+
+    *browser_switcher.lock().expect("browser switcher lock poisoned") = Some(BrowserSwitcherState {
+        active_region: active_region.clone(),
+        sidebar: sidebar.clone(),
+        tabs: Vec::new(),
+        active_index: 0,
+    });
+
+    let mut popup_button_delegate = SwitcherOpenPopupButtonDelegate::new(extensions.clone());
+    let popup_text = CefString::from("Open Popup");
+    let popup_button = label_button_create(Some(&mut popup_button_delegate), Some(&popup_text))
+        .expect("label_button_create failed");
+    let mut popup_button_view = View::from(&popup_button);
+    sidebar.add_child_view(Some(&mut popup_button_view));
+
+    let mut sidebar_view = View::from(&sidebar);
+    let mut active_region_view = View::from(&active_region);
+    if let Some(root_layout) = &root_layout {
+        window.add_child_view(Some(&mut sidebar_view));
+        root_layout.set_flex_for_view(Some(&mut sidebar_view), 0);
+        window.add_child_view(Some(&mut active_region_view));
+        root_layout.set_flex_for_view(Some(&mut active_region_view), 1);
+    }
+
+    window.show();
+}
+
+wrap_display_handler! {
+    struct TabDisplayHandler {
+        title: Arc<Mutex<String>>,
+    }
+
+    impl DisplayHandler {
+        fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            *self.title.lock().expect("title lock poisoned") =
+                title.map(|t| t.to_string()).unwrap_or_default();
+        }
+    }
+}
+
+wrap_client! {
+    struct TabClient {
+        title: Arc<Mutex<String>>,
+    }
+
+    impl Client {
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(TabDisplayHandler::new(self.title.clone()))
+        }
+    }
+}
+
+wrap_window_delegate! {
+    struct TabWindowDelegate {}
+
+    impl ViewDelegate {
+        fn preferred_size(&self, _view: Option<&mut View>) -> Size {
+            Size { width: 1024, height: 768 }
+        }
+    }
+    impl PanelDelegate {}
+    impl WindowDelegate {
+        fn can_close(&self, _window: Option<&mut Window>) -> i32 {
+            1
+        }
+
+        fn window_runtime_style(&self) -> RuntimeStyle {
+            RuntimeStyle::ALLOY
+        }
+    }
+}
+
+wrap_browser_view_delegate! {
+    struct TabBrowserViewDelegate {}
+
+    impl ViewDelegate {}
+    impl BrowserViewDelegate {
+        fn browser_runtime_style(&self) -> RuntimeStyle {
+            RuntimeStyle::ALLOY
+        }
+    }
+}
+
+impl rashomon::browser::types::Host for KernelState {}
+
+impl rashomon::browser::types::HostBrowserContext for KernelState {
+    fn id(&mut self, self_: Resource<BrowserContext>) -> String {
+        self.table.get(&self_).map(|c| c.id.clone()).unwrap_or_default()
+    }
+
+    fn list_extensions(
+        &mut self,
+        _self_: Resource<BrowserContext>,
+    ) -> Vec<rashomon::browser::types::ExtensionInfo> {
+        self.extensions
+            .iter()
+            .map(|ext| rashomon::browser::types::ExtensionInfo {
+                id: ext.config.id.clone(),
+                name: ext.config.name.clone(),
+                popup_open: matches!(
+                    *ext.popup.lock().expect("popup lock poisoned"),
+                    PopupState::Open(..)
+                ),
+            })
+            .collect()
+    }
+
+    fn toggle_extension_popup(
+        &mut self,
+        _self_: Resource<BrowserContext>,
+        extension_id: String,
+    ) -> Result<(), String> {
+        let ext = self
+            .extensions
+            .iter()
+            .find(|ext| ext.config.id == extension_id)
+            .ok_or_else(|| format!("unknown extension id: {extension_id}"))?;
+        toggle_extension_popup_impl(ext)
+    }
+
+    fn drop(&mut self, self_: Resource<BrowserContext>) -> wasmtime::Result<()> {
+        self.table.delete(self_)?;
+        Ok(())
+    }
+}
+
+impl rashomon::browser::types::HostBrowserTab for KernelState {
+    fn id(&mut self, self_: Resource<BrowserTab>) -> String {
+        self.table.get(&self_).map(|tab| tab.id.clone()).unwrap_or_default()
+    }
+
+    fn navigate(&mut self, self_: Resource<BrowserTab>, url: String) -> Result<(), String> {
+        let tab = self.table.get(&self_).map_err(|e| e.to_string())?;
+        let browser = tab.browser_view.browser().ok_or("browser not ready yet")?;
+        let frame = browser.main_frame().ok_or("tab has no main frame")?;
+        frame.load_url(Some(&CefString::from(url.as_str())));
+        Ok(())
+    }
+
+    fn current_url(&mut self, self_: Resource<BrowserTab>) -> String {
+        let Ok(tab) = self.table.get(&self_) else { return String::new() };
+        tab.browser_view
+            .browser()
+            .and_then(|b| b.main_frame())
+            .map(|f| CefString::from(&f.url()).to_string())
+            .unwrap_or_default()
+    }
+
+    fn title(&mut self, self_: Resource<BrowserTab>) -> String {
+        let Ok(tab) = self.table.get(&self_) else { return String::new() };
+        tab.title.lock().expect("title lock poisoned").clone()
+    }
+
+    fn close(&mut self, self_: Resource<BrowserTab>) {
+        if let Ok(tab) = self.table.get(&self_) {
+            if let Some(host) = tab.browser_view.browser().and_then(|b| b.host()) {
+                host.close_browser(1);
+            }
+        }
+    }
+
+    fn snapshot_dom(&mut self, _self_: Resource<BrowserTab>) -> Result<String, String> {
+        Err("not implemented yet".to_string())
+    }
+
+    fn inject_script(&mut self, self_: Resource<BrowserTab>, script: String) -> Result<String, String> {
+        let tab = self.table.get(&self_).map_err(|e| e.to_string())?;
+        let browser = tab.browser_view.browser().ok_or("browser not ready yet")?;
+        let frame = browser.main_frame().ok_or("tab has no main frame")?;
+        frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+        // `execute_java_script` has no return value in CEF's own API —
+        // getting the script's result back would need a round trip
+        // through a V8 handler/extension, same as the rest of this
+        // kernel's input bridge. Deferred along with `snapshot-dom`.
+        Ok(String::new())
+    }
+
+    fn anchor(&mut self, _self_: Resource<BrowserTab>, _spec: String) -> Result<String, String> {
+        Err("not implemented yet".to_string())
+    }
+
+    fn drop(&mut self, self_: Resource<BrowserTab>) -> wasmtime::Result<()> {
+        if let Ok(tab) = self.table.delete(self_) {
+            if let Some(host) = tab.browser_view.browser().and_then(|b| b.host()) {
+                host.close_browser(1);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl rashomon::browser::control::Host for KernelState {
+    fn create_context(&mut self) -> Resource<BrowserContext> {
+        self.table
+            .push(BrowserContext { id: "default".to_string() })
+            .expect("resource table push failed")
+    }
+
+    /// Mounts the new tab's `BrowserView` into the shared switcher
+    /// window's active-region panel (making it visible immediately if
+    /// it's the first tab ever created, exactly like
+    /// `cef-extension-spike`'s `TabSwitcher` mounted its first tab at
+    /// startup) rather than giving it a window of its own.
+    fn create_tab(&mut self, _context: Resource<BrowserContext>, url: String) -> Resource<BrowserTab> {
+        let title = Arc::new(Mutex::new(String::new()));
+        let mut client = TabClient::new(title.clone());
+        let settings = BrowserSettings::default();
+        let cef_url = CefString::from(url.as_str());
+        let mut browser_view_delegate = TabBrowserViewDelegate::new();
+        let browser_view = browser_view_create(
+            Some(&mut client),
+            Some(&cef_url),
+            Some(&settings),
+            None,
+            None,
+            Some(&mut browser_view_delegate),
+        )
+        .expect("browser_view_create failed");
+
+        mount_tab_in_switcher(&self.browser_switcher, browser_view.clone());
+
+        let id = format!("tab-{}", next_tab_id());
+        self.table
+            .push(BrowserTab { id, browser_view, title })
+            .expect("resource table push failed")
+    }
+}
+
+/// Unique across the process, independent of the `ResourceTable`'s own
+/// internal indices (which get reused once a tab's resource is
+/// dropped) — the tab's identity shouldn't change meaning if an
+/// unrelated, later tab happens to land in the same table slot.
+fn next_tab_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 fn to_lib_role(role: rashomon::graph::types::Role) -> rashomon_graph::Role {
     match role {
         rashomon::graph::types::Role::Entity => rashomon_graph::Role::Entity,
@@ -473,25 +1007,30 @@ struct InputBridge {
 }
 
 /// Everything needed to open a new View or mirror an existing one in a
-/// new Window: which Facets exist to instantiate, and the live state
-/// ([`InputBridge`]) either needs to register itself into.
+/// new mounted tab: which Facets exist to instantiate, the live state
+/// ([`InputBridge`]) either needs to register itself into, and the one
+/// shared switcher ([`BrowserSwitcherState`]) every View's `BrowserView`
+/// gets mounted into — the same one `create_tab` mounts browser tabs
+/// into, so a terminal session and a browser tab are just two entries
+/// in one list, switched between the same way.
 struct Kernel {
     facets: FacetRegistry,
     bridge: Arc<Mutex<InputBridge>>,
+    browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
 }
 
 impl Kernel {
     /// Instantiates `facet_name`'s Component fresh, calls its `render`
-    /// against `node_id` to get its first View, and opens that View in
-    /// a brand-new top-level CEF Window (see the module doc comment for
-    /// why this is a real Window rather than a pane in a shared one,
-    /// for now) — the same as [`Kernel::open_window`] would for any
-    /// later Window mirroring this View, just with a fresh View instead
-    /// of an existing one. Safe to call more than once against the same
-    /// Facet: each call is an independent instantiation (independent
-    /// `SESSION`-style guest state), the same way opening two terminal
-    /// windows in a real OS gives you two independent shells, not one
-    /// shared one — [`Kernel::open_window`] is what shares one.
+    /// against `node_id` to get its first View, and mounts that View as
+    /// a new tab in the one shared switcher window (see
+    /// [`open_browser_switcher_window`]) — the same as
+    /// [`Kernel::open_window`] would for any later tab mirroring this
+    /// View, just with a fresh View instead of an existing one. Safe to
+    /// call more than once against the same Facet: each call is an
+    /// independent instantiation (independent `SESSION`-style guest
+    /// state), the same way opening two terminal sessions in a real OS
+    /// gives you two independent shells, not one shared one —
+    /// [`Kernel::open_window`] is what shares one.
     fn open_view(&self, node_id: &str, facet_name: &str) -> Result<String> {
         let component = self.facets.component(facet_name)?;
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
@@ -515,12 +1054,16 @@ impl Kernel {
         Ok(view_id)
     }
 
-    /// Opens a new top-level CEF Window mirroring the already-running
-    /// View `view_id`: same `initial_html`, a fresh window id spliced
-    /// in. Input typed into this Window reaches the exact same Facet
-    /// instance (and so the same PTY, for `terminal-xterm`) as every
-    /// other Window mirroring this View; output is fanned out to all of
-    /// them via `pending` (see [`ViewHandle`]).
+    /// Mounts a new tab into the shared switcher window mirroring the
+    /// already-running View `view_id`: same `initial_html`, a fresh
+    /// window id spliced in. Input typed into this tab reaches the
+    /// exact same Facet instance (and so the same PTY, for
+    /// `terminal-xterm`) as every other tab mirroring this View; output
+    /// is fanned out to all of them via `pending` (see [`ViewHandle`]).
+    /// A real `BrowserView` (Views framework), not the raw
+    /// `browser_host_create_browser` path — that's what lets this
+    /// mount into [`BrowserSwitcherState::active_region`] alongside
+    /// browser tabs instead of getting its own native window.
     fn open_window(&self, view_id: &str) -> Result<String> {
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
         let view = bridge
@@ -543,26 +1086,26 @@ impl Kernel {
             .client
             .clone()
             .ok_or_else(|| anyhow!("no Client yet — called before on_context_initialized?"))?;
-        // Dropped before calling into CEF: `browser_host_create_browser`
-        // can turn around and call `LifeSpanHandler::on_after_created`
+        // Dropped before calling into CEF: `browser_view_create` can
+        // turn around and call `LifeSpanHandler::on_after_created`
         // (which also locks `self.bridge`) before this function
         // returns, and `Mutex` isn't reentrant.
         drop(bridge);
 
-        let window_info = WindowInfo {
-            runtime_style: RuntimeStyle::ALLOY,
-            ..Default::default()
-        };
         let settings = BrowserSettings::default();
         let url = CefString::from(html_data_uri(&inject_window_id(&html, &window_id)).as_str());
-        browser_host_create_browser(
-            Some(&window_info),
+        let mut browser_view_delegate = TabBrowserViewDelegate::new();
+        let browser_view = browser_view_create(
             Some(&mut client),
             Some(&url),
             Some(&settings),
             None,
             None,
-        );
+            Some(&mut browser_view_delegate),
+        )
+        .ok_or_else(|| anyhow!("browser_view_create failed"))?;
+
+        mount_tab_in_switcher(&self.browser_switcher, browser_view);
 
         Ok(window_id)
     }
@@ -742,6 +1285,10 @@ wrap_browser_process_handler! {
     struct KernelBrowserProcessHandler {
         kernel: Arc<Kernel>,
         initial_views: Arc<Vec<(String, String, u32)>>,
+        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+        extensions: Arc<Vec<ExtensionRuntime>>,
+        browser_component: Option<Arc<Component>>,
+        browser_demo_node_id: String,
     }
 
     impl BrowserProcessHandler {
@@ -764,6 +1311,29 @@ wrap_browser_process_handler! {
             );
 
             self.kernel.bridge.lock().expect("input bridge lock poisoned").client = Some(client);
+
+            // Must happen before the `browser` Facet's `render()` call
+            // below — `create-tab` needs `browser_switcher` to already
+            // be `Some(..)` so it has somewhere to mount the tabs it
+            // creates.
+            open_browser_switcher_window(&self.browser_switcher, &self.extensions);
+
+            if let Some(browser_component) = &self.browser_component {
+                let mut bridge = self.kernel.bridge.lock().expect("input bridge lock poisoned");
+                let result = FacetWorld::instantiate(&mut bridge.store, browser_component, &self.kernel.facets.linker)
+                    .map_err(|e| anyhow!("failed to instantiate browser component: {e}"))
+                    .and_then(|bindings| {
+                        bindings
+                            .rashomon_facet_contract()
+                            .call_render(&mut bridge.store, &self.browser_demo_node_id)
+                            .map_err(|e| anyhow!("browser component's render() failed: {e}"))
+                    });
+                drop(bridge);
+                match result {
+                    Ok(summary) => println!("browser component rendered: {summary}"),
+                    Err(e) => eprintln!("{e}"),
+                }
+            }
 
             for (node_id, facet_name, window_count) in self.initial_views.iter() {
                 let view_id = match self.kernel.open_view(node_id, facet_name) {
@@ -833,6 +1403,11 @@ wrap_app! {
     pub struct KernelApp {
         kernel: Option<Arc<Kernel>>,
         initial_views: Option<Arc<Vec<(String, String, u32)>>>,
+        extension_configs: Arc<Vec<BrowserExtensionConfig>>,
+        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+        runtime_extensions: Arc<Vec<ExtensionRuntime>>,
+        browser_component: Option<Arc<Component>>,
+        browser_demo_node_id: String,
     }
 
     impl App {
@@ -840,11 +1415,47 @@ wrap_app! {
             let (Some(kernel), Some(initial_views)) = (self.kernel.clone(), self.initial_views.clone()) else {
                 return None;
             };
-            Some(KernelBrowserProcessHandler::new(kernel, initial_views))
+            Some(KernelBrowserProcessHandler::new(
+                kernel,
+                initial_views,
+                self.browser_switcher.clone(),
+                self.runtime_extensions.clone(),
+                self.browser_component.clone(),
+                self.browser_demo_node_id.clone(),
+            ))
         }
 
         fn render_process_handler(&self) -> Option<RenderProcessHandler> {
             Some(KernelRenderProcessHandler::new())
+        }
+
+        /// Only the browser process (empty/absent `--type`) owns
+        /// extension loading — subprocesses re-parse the same command
+        /// line but don't need these switches appended a second time.
+        /// Settled by hands-on CEF spiking in `cef-extension-spike`.
+        fn on_before_command_line_processing(
+            &self,
+            process_type: Option<&CefString>,
+            command_line: Option<&mut CommandLine>,
+        ) {
+            if process_type.is_some() || self.extension_configs.is_empty() {
+                return;
+            }
+            let Some(command_line) = command_line else { return };
+            let paths = self
+                .extension_configs
+                .iter()
+                .map(|ext| ext.path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(",");
+            command_line.append_switch_with_value(
+                Some(&CefString::from("load-extension")),
+                Some(&CefString::from(paths.as_str())),
+            );
+            command_line.append_switch_with_value(
+                Some(&CefString::from("disable-extensions-except")),
+                Some(&CefString::from(paths.as_str())),
+            );
         }
     }
 }
@@ -857,7 +1468,15 @@ wrap_app! {
 /// `render_process_handler()` still works without a `Kernel`, which it
 /// does).
 pub fn make_minimal_app() -> App {
-    KernelApp::new(None, None)
+    KernelApp::new(
+        None,
+        None,
+        Arc::new(Vec::new()),
+        Arc::new(Mutex::new(None)),
+        Arc::new(Vec::new()),
+        None,
+        String::new(),
+    )
 }
 
 /// Everything that happens once we know this process is the CEF browser
@@ -873,6 +1492,7 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let shell_wasm_path = ensure_component_built("shell")?;
     let terminal_wasm_path = ensure_component_built("terminal")?;
     let terminal_xterm_wasm_path = ensure_component_built("terminal-xterm")?;
+    let browser_wasm_path = ensure_component_built("browser")?;
     let graph_db_path = graph_db_path()?;
 
     let engine = Engine::default();
@@ -882,12 +1502,39 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
 
     println!("graph database: {}", graph_db_path.display());
 
+    let browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>> = Arc::new(Mutex::new(None));
+
+    // Demo-only, to reproduce `cef-extension-spike`'s validated
+    // tab-switching + popup-toggle behavior end to end through the
+    // real primitive: reuses the Bitwarden copy that spike already
+    // validated (`crates/cef-extension-spike/bitwarden-extension/`,
+    // itself copied from this machine's own Brave profile, gitignored)
+    // rather than duplicating a ~70MB third-party extension into this
+    // crate too. Not portable to a fresh clone that hasn't run that
+    // spike — there's no persisted extension-configuration system yet,
+    // see `BrowserExtensionConfig`'s doc comment.
+    let extension_configs: Arc<Vec<BrowserExtensionConfig>> = Arc::new(vec![BrowserExtensionConfig {
+        path: Path::new(env!("CARGO_MANIFEST_DIR")).join("../cef-extension-spike/bitwarden-extension"),
+        id: "nngceckbapebfimnlniiiahkandclblb".to_string(),
+        name: "Bitwarden".to_string(),
+        popup_page: "popup/index.html".to_string(),
+    }]);
+    let extensions: Arc<Vec<ExtensionRuntime>> = Arc::new(
+        extension_configs
+            .iter()
+            .cloned()
+            .map(|config| ExtensionRuntime { config, popup: Arc::new(Mutex::new(PopupState::Closed)) })
+            .collect(),
+    );
+
     let mut store = Store::new(
         &engine,
         KernelState {
             graph: rashomon_graph::PersistentGraphStore::open(&graph_db_path),
             wasi_ctx: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
+            extensions: extensions.clone(),
+            browser_switcher: browser_switcher.clone(),
         },
     );
 
@@ -951,6 +1598,15 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         .create_node("rashomon:thread", rashomon_graph::Role::Entity, Default::default())
         .id;
 
+    // A durable Entity for the browser Facet's `create-tab` calls to
+    // attach their `rashomon:page` Occurrences to, same reasoning as
+    // `thread_id` above.
+    let browser_demo_node_id = store
+        .data_mut()
+        .graph
+        .create_node("rashomon:thread", rashomon_graph::Role::Entity, Default::default())
+        .id;
+
     let terminal_xterm_component =
         Component::from_file(&engine, &terminal_xterm_wasm_path).map_err(|e| {
             anyhow!(
@@ -958,6 +1614,14 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
                 terminal_xterm_wasm_path.display()
             )
         })?;
+
+    // Not opened via `Kernel::open_view` (which assumes a Facet's View
+    // is HTML rendered into a `data:` URI window) — its `render()` is
+    // called directly in `on_context_initialized`, once the native
+    // browser switcher window exists for its `create-tab` calls to
+    // mount into. See `KernelBrowserProcessHandler`.
+    let browser_component = Component::from_file(&engine, &browser_wasm_path)
+        .map_err(|e| anyhow!("failed to load component at {}: {e}", browser_wasm_path.display()))?;
 
     let mut facets = HashMap::new();
     facets.insert("terminal-xterm".to_string(), terminal_xterm_component);
@@ -978,6 +1642,7 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let kernel = Arc::new(Kernel {
         facets: FacetRegistry { linker, components: facets },
         bridge,
+        browser_switcher: browser_switcher.clone(),
     });
 
     // One `terminal-xterm` View, mirrored into two Windows: typing in
@@ -986,7 +1651,15 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     // `Kernel::open_window`.
     let initial_views = Arc::new(vec![(mirrored_thread, "terminal-xterm".to_string(), 2u32)]);
 
-    let mut app = KernelApp::new(Some(kernel), Some(initial_views));
+    let mut app = KernelApp::new(
+        Some(kernel),
+        Some(initial_views),
+        extension_configs,
+        browser_switcher,
+        extensions,
+        Some(Arc::new(browser_component)),
+        browser_demo_node_id,
+    );
     let settings = Settings {
         no_sandbox: 1,
         ..Default::default()

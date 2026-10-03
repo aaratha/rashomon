@@ -21,5 +21,6 @@ world = "facet-world"
 "rashomon:graph" = { path = "../../wit/deps/graph.wit" }
 "rashomon:facet" = { path = "../../wit/deps/facet.wit" }
 "rashomon:process" = { path = "../../wit/deps/process.wit" }
+"rashomon:browser" = { path = "../../wit/deps/browser.wit" }
 
 [package.metadata.component.dependencies]

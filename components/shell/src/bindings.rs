@@ -4,6 +4,1015 @@
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
 pub mod rashomon {
+    pub mod browser {
+        /// Backed natively by CEF; never embedded in WASM itself. A
+        /// `browser-context` is a persistent profile (cookies, cache, logins,
+        /// and the fixed set of extensions the kernel loaded at startup — see
+        /// `extension-info` below); a `browser-tab` is one navigable surface
+        /// within a context — named `tab`, not `view`, so this low-level
+        /// handle isn't confused with a Core Model *View* (an open instance of
+        /// a Facet). Settled by hands-on CEF spiking (see `cef-extension-spike`):
+        /// every tab and every extension popup is a plain `RuntimeStyle::ALLOY`
+        /// browser — there is no Chrome-style toolbar/tab-strip anywhere in
+        /// this design, since a single native window can host only one
+        /// Chrome-style `BrowserView` for its entire lifetime, which rules out
+        /// swappable Chrome-style tabs outright. `navigate`/`current-url`/
+        /// `create-tab` have settled signatures; `snapshot-dom`/
+        /// `inject-script`/`anchor` are signatures only still — no bodies yet.
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod types {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct BrowserContext {
+                handle: _rt::Resource<BrowserContext>,
+            }
+            impl BrowserContext {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for BrowserContext {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]browser-context"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            /// Enough for a sidebar to render one icon per installed
+            /// extension and reflect whether its popup is currently open —
+            /// deliberately not the full `chrome.management` shape, which
+            /// this design has no other use for yet.
+            #[derive(Clone)]
+            pub struct ExtensionInfo {
+                pub id: _rt::String,
+                pub name: _rt::String,
+                pub popup_open: bool,
+            }
+            impl ::core::fmt::Debug for ExtensionInfo {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ExtensionInfo")
+                        .field("id", &self.id)
+                        .field("name", &self.name)
+                        .field("popup-open", &self.popup_open)
+                        .finish()
+                }
+            }
+            /// Enough to rebuild a tab switcher's list (e.g. the one in
+            /// `cef-extension-spike`) without holding a live `browser-tab`
+            /// handle per tab — `get-tab` resolves one of these back to a
+            /// live handle on demand.
+            #[derive(Clone)]
+            pub struct TabInfo {
+                pub id: _rt::String,
+                pub url: _rt::String,
+                pub title: _rt::String,
+            }
+            impl ::core::fmt::Debug for TabInfo {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("TabInfo")
+                        .field("id", &self.id)
+                        .field("url", &self.url)
+                        .field("title", &self.title)
+                        .finish()
+                }
+            }
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct BrowserTab {
+                handle: _rt::Resource<BrowserTab>,
+            }
+            impl BrowserTab {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for BrowserTab {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unreachable!();
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[resource-drop]browser-tab"]
+                            fn drop(_: u32);
+                        }
+                        unsafe { drop(_handle) };
+                    }
+                }
+            }
+            impl BrowserContext {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn id(&self) -> _rt::String {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-context.id"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        let result5 = _rt::string_lift(bytes4);
+                        result5
+                    }
+                }
+            }
+            impl BrowserContext {
+                #[allow(unused_unsafe, clippy::all)]
+                /// The kernel's extensions are loaded once at startup via
+                /// CEF's `--load-extension` command-line switch (CEF's own
+                /// dynamic, per-context extension-loading API was removed
+                /// around the versions this project targets — confirmed by
+                /// inspecting the raw bindings directly). So this list is
+                /// fixed for the process's lifetime; there is no
+                /// `load-extension` call here to pair with it.
+                pub fn list_extensions(&self) -> _rt::Vec<ExtensionInfo> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-context.list-extensions"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let base11 = l2;
+                        let len11 = l3;
+                        let mut result11 = _rt::Vec::with_capacity(len11);
+                        for i in 0..len11 {
+                            let base = base11
+                                .add(i * (5 * ::core::mem::size_of::<*const u8>()));
+                            let e11 = {
+                                let l4 = *base.add(0).cast::<*mut u8>();
+                                let l5 = *base
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                let bytes6 = _rt::Vec::from_raw_parts(
+                                    l4.cast(),
+                                    len6,
+                                    len6,
+                                );
+                                let l7 = *base
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l8 = *base
+                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len9 = l8;
+                                let bytes9 = _rt::Vec::from_raw_parts(
+                                    l7.cast(),
+                                    len9,
+                                    len9,
+                                );
+                                let l10 = i32::from(
+                                    *base
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>(),
+                                );
+                                ExtensionInfo {
+                                    id: _rt::string_lift(bytes6),
+                                    name: _rt::string_lift(bytes9),
+                                    popup_open: _rt::bool_lift(l10 as u8),
+                                }
+                            };
+                            result11.push(e11);
+                        }
+                        _rt::cabi_dealloc(
+                            base11,
+                            len11 * (5 * ::core::mem::size_of::<*const u8>()),
+                            ::core::mem::size_of::<*const u8>(),
+                        );
+                        let result12 = result11;
+                        result12
+                    }
+                }
+            }
+            impl BrowserContext {
+                #[allow(unused_unsafe, clippy::all)]
+                /// Opens (or, if already open, closes) the given extension's
+                /// popup UI — a toggle, not two separate calls, so the host
+                /// can guard against the "open" path racing itself when
+                /// pressed twice before the first popup browser finishes
+                /// creating. Implemented as a dedicated `RuntimeStyle::ALLOY`
+                /// browser whose *initial* URL is the extension's own
+                /// `chrome-extension://<id>/<popup page>` — proven to render
+                /// real extension UIs (including Bitwarden's) with zero
+                /// cooperation from the extension's own code, unlike
+                /// `chrome.action.openPopup()` (which needs a Chrome-style
+                /// toolbar and a real user gesture, neither of which this
+                /// design has) or navigating an *existing* tab to that URL
+                /// (blocked outright by Chrome's extension-popup guard).
+                pub fn toggle_extension_popup(
+                    &self,
+                    extension_id: &str,
+                ) -> Result<(), _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = extension_id;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-context.toggle-extension-popup"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result7 = match l3 {
+                            0 => {
+                                let e = ();
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l5 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len6 = l5;
+                                    let bytes6 = _rt::Vec::from_raw_parts(
+                                        l4.cast(),
+                                        len6,
+                                        len6,
+                                    );
+                                    _rt::string_lift(bytes6)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result7
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn id(&self) -> _rt::String {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.id"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        let result5 = _rt::string_lift(bytes4);
+                        result5
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn navigate(&self, url: &str) -> Result<(), _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = url;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.navigate"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result7 = match l3 {
+                            0 => {
+                                let e = ();
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l5 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len6 = l5;
+                                    let bytes6 = _rt::Vec::from_raw_parts(
+                                        l4.cast(),
+                                        len6,
+                                        len6,
+                                    );
+                                    _rt::string_lift(bytes6)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result7
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn current_url(&self) -> _rt::String {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.current-url"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        let result5 = _rt::string_lift(bytes4);
+                        result5
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn title(&self) -> _rt::String {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 2 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 2
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.title"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = *ptr0.add(0).cast::<*mut u8>();
+                        let l3 = *ptr0
+                            .add(::core::mem::size_of::<*const u8>())
+                            .cast::<usize>();
+                        let len4 = l3;
+                        let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                        let result5 = _rt::string_lift(bytes4);
+                        result5
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn close(&self) -> () {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.close"]
+                            fn wit_import0(_: i32);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import0(_: i32) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import0((self).handle() as i32) };
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn snapshot_dom(&self) -> Result<_rt::String, _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.snapshot-dom"]
+                            fn wit_import1(_: i32, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                            unreachable!()
+                        }
+                        unsafe { wit_import1((self).handle() as i32, ptr0) };
+                        let l2 = i32::from(*ptr0.add(0).cast::<u8>());
+                        let result9 = match l2 {
+                            0 => {
+                                let e = {
+                                    let l3 = *ptr0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l4 = *ptr0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len5 = l4;
+                                    let bytes5 = _rt::Vec::from_raw_parts(
+                                        l3.cast(),
+                                        len5,
+                                        len5,
+                                    );
+                                    _rt::string_lift(bytes5)
+                                };
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l6 = *ptr0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l7 = *ptr0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len8 = l7;
+                                    let bytes8 = _rt::Vec::from_raw_parts(
+                                        l6.cast(),
+                                        len8,
+                                        len8,
+                                    );
+                                    _rt::string_lift(bytes8)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result9
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn inject_script(
+                    &self,
+                    script: &str,
+                ) -> Result<_rt::String, _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = script;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.inject-script"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result10 = match l3 {
+                            0 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l5 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len6 = l5;
+                                    let bytes6 = _rt::Vec::from_raw_parts(
+                                        l4.cast(),
+                                        len6,
+                                        len6,
+                                    );
+                                    _rt::string_lift(bytes6)
+                                };
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l7 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l8 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len9 = l8;
+                                    let bytes9 = _rt::Vec::from_raw_parts(
+                                        l7.cast(),
+                                        len9,
+                                        len9,
+                                    );
+                                    _rt::string_lift(bytes9)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result10
+                    }
+                }
+            }
+            impl BrowserTab {
+                #[allow(unused_unsafe, clippy::all)]
+                pub fn anchor(&self, spec: &str) -> Result<_rt::String, _rt::String> {
+                    unsafe {
+                        #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                        #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                        struct RetArea(
+                            [::core::mem::MaybeUninit<
+                                u8,
+                            >; 3 * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let mut ret_area = RetArea(
+                            [::core::mem::MaybeUninit::uninit(); 3
+                                * ::core::mem::size_of::<*const u8>()],
+                        );
+                        let vec0 = spec;
+                        let ptr0 = vec0.as_ptr().cast::<u8>();
+                        let len0 = vec0.len();
+                        let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                        #[cfg(target_arch = "wasm32")]
+                        #[link(wasm_import_module = "rashomon:browser/types")]
+                        unsafe extern "C" {
+                            #[link_name = "[method]browser-tab.anchor"]
+                            fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        unsafe extern "C" fn wit_import2(
+                            _: i32,
+                            _: *mut u8,
+                            _: usize,
+                            _: *mut u8,
+                        ) {
+                            unreachable!()
+                        }
+                        unsafe {
+                            wit_import2(
+                                (self).handle() as i32,
+                                ptr0.cast_mut(),
+                                len0,
+                                ptr1,
+                            )
+                        };
+                        let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                        let result10 = match l3 {
+                            0 => {
+                                let e = {
+                                    let l4 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l5 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len6 = l5;
+                                    let bytes6 = _rt::Vec::from_raw_parts(
+                                        l4.cast(),
+                                        len6,
+                                        len6,
+                                    );
+                                    _rt::string_lift(bytes6)
+                                };
+                                Ok(e)
+                            }
+                            1 => {
+                                let e = {
+                                    let l7 = *ptr1
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l8 = *ptr1
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len9 = l8;
+                                    let bytes9 = _rt::Vec::from_raw_parts(
+                                        l7.cast(),
+                                        len9,
+                                        len9,
+                                    );
+                                    _rt::string_lift(bytes9)
+                                };
+                                Err(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        };
+                        result10
+                    }
+                }
+            }
+        }
+        /// Named `control` (the doc's own term, "browser control"), not
+        /// `browser`, so it isn't redundant with the enclosing `rashomon:browser`
+        /// package. There's exactly one `browser-context` for now (the kernel's
+        /// one user profile) — `create-context` is still named for a future
+        /// where that isn't true, but every call during this pass is expected
+        /// to reuse the one made at kernel startup, not make a second one.
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod control {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type BrowserContext = super::super::super::rashomon::browser::types::BrowserContext;
+            pub type BrowserTab = super::super::super::rashomon::browser::types::BrowserTab;
+            pub type TabInfo = super::super::super::rashomon::browser::types::TabInfo;
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn create_context() -> BrowserContext {
+                unsafe {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:browser/control")]
+                    unsafe extern "C" {
+                        #[link_name = "create-context"]
+                        fn wit_import0() -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import0() -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import0() };
+                    unsafe {
+                        super::super::super::rashomon::browser::types::BrowserContext::from_handle(
+                            ret as u32,
+                        )
+                    }
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn create_tab(context: &BrowserContext, url: &str) -> BrowserTab {
+                unsafe {
+                    let vec0 = url;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:browser/control")]
+                    unsafe extern "C" {
+                        #[link_name = "create-tab"]
+                        fn wit_import1(_: i32, _: *mut u8, _: usize) -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(
+                        _: i32,
+                        _: *mut u8,
+                        _: usize,
+                    ) -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe {
+                        wit_import1((context).handle() as i32, ptr0.cast_mut(), len0)
+                    };
+                    unsafe {
+                        super::super::super::rashomon::browser::types::BrowserTab::from_handle(
+                            ret as u32,
+                        )
+                    }
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn list_tabs(context: &BrowserContext) -> _rt::Vec<TabInfo> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 2 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 2
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:browser/control")]
+                    unsafe extern "C" {
+                        #[link_name = "list-tabs"]
+                        fn wit_import1(_: i32, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1((context).handle() as i32, ptr0) };
+                    let l2 = *ptr0.add(0).cast::<*mut u8>();
+                    let l3 = *ptr0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let base13 = l2;
+                    let len13 = l3;
+                    let mut result13 = _rt::Vec::with_capacity(len13);
+                    for i in 0..len13 {
+                        let base = base13
+                            .add(i * (6 * ::core::mem::size_of::<*const u8>()));
+                        let e13 = {
+                            let l4 = *base.add(0).cast::<*mut u8>();
+                            let l5 = *base
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len6 = l5;
+                            let bytes6 = _rt::Vec::from_raw_parts(l4.cast(), len6, len6);
+                            let l7 = *base
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l8 = *base
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len9 = l8;
+                            let bytes9 = _rt::Vec::from_raw_parts(l7.cast(), len9, len9);
+                            let l10 = *base
+                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l11 = *base
+                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len12 = l11;
+                            let bytes12 = _rt::Vec::from_raw_parts(
+                                l10.cast(),
+                                len12,
+                                len12,
+                            );
+                            super::super::super::rashomon::browser::types::TabInfo {
+                                id: _rt::string_lift(bytes6),
+                                url: _rt::string_lift(bytes9),
+                                title: _rt::string_lift(bytes12),
+                            }
+                        };
+                        result13.push(e13);
+                    }
+                    _rt::cabi_dealloc(
+                        base13,
+                        len13 * (6 * ::core::mem::size_of::<*const u8>()),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let result14 = result13;
+                    result14
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn get_tab(
+                context: &BrowserContext,
+                tab_id: &str,
+            ) -> Option<BrowserTab> {
+                unsafe {
+                    #[repr(align(4))]
+                    struct RetArea([::core::mem::MaybeUninit<u8>; 8]);
+                    let mut ret_area = RetArea([::core::mem::MaybeUninit::uninit(); 8]);
+                    let vec0 = tab_id;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:browser/control")]
+                    unsafe extern "C" {
+                        #[link_name = "get-tab"]
+                        fn wit_import2(_: i32, _: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(
+                        _: i32,
+                        _: *mut u8,
+                        _: usize,
+                        _: *mut u8,
+                    ) {
+                        unreachable!()
+                    }
+                    unsafe {
+                        wit_import2(
+                            (context).handle() as i32,
+                            ptr0.cast_mut(),
+                            len0,
+                            ptr1,
+                        )
+                    };
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result5 = match l3 {
+                        0 => None,
+                        1 => {
+                            let e = {
+                                let l4 = *ptr1.add(4).cast::<i32>();
+                                unsafe {
+                                    super::super::super::rashomon::browser::types::BrowserTab::from_handle(
+                                        l4 as u32,
+                                    )
+                                }
+                            };
+                            Some(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result5
+                }
+            }
+        }
+    }
     pub mod graph {
         /// Shared data shapes for the graph primitive: Nodes, Edges, and the
         /// role that distinguishes a durable Entity from a weak-identity
@@ -1644,6 +2653,17 @@ mod _rt {
             self as i32
         }
     }
+    pub unsafe fn bool_lift(val: u8) -> bool {
+        if cfg!(debug_assertions) {
+            match val {
+                0 => false,
+                1 => true,
+                _ => panic!("invalid bool discriminant"),
+            }
+        } else {
+            val != 0
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -1686,9 +2706,9 @@ pub(crate) use __export_facet_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1210] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb8\x08\x01A\x02\x01\
-A\x0f\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2177] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xff\x0f\x01A\x02\x01\
+A\x16\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
 keys\x05values\x04\0\x08property\x03\0\x02\x01p\x03\x01r\x04\x02ids\x09node-type\
 s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x09edge-\
 types\x06sources\x06targets\x09timestampw\x0aconfidencev\x04\0\x04edge\x03\0\x07\
@@ -1710,11 +2730,32 @@ elf\x01\0z\x04\0\x14[method]process.wait\x01\x0a\x03\0\x16rashomon:process/types
 \x05\x06\x02\x03\0\x02\x07process\x01B\x08\x02\x03\x02\x01\x07\x04\0\x07process\x03\
 \0\0\x01ps\x01ks\x01i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\x02\x03\
 cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x03\0\x18rashomon:process/spawner\x05\x08\x01\
-B\x07\x01@\x01\x07node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\
-\x04\0\x0chandle-input\x01\x02\x01@\0\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17r\
-ashomon:facet/contract\x05\x09\x04\0\x1crashomon:runtime/facet-world\x04\0\x0b\x11\
-\x01\0\x0bfacet-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-com\
-ponent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+B\x1f\x04\0\x0fbrowser-context\x03\x01\x01r\x03\x02ids\x04names\x0apopup-open\x7f\
+\x04\0\x0eextension-info\x03\0\x01\x01r\x03\x02ids\x03urls\x05titles\x04\0\x08ta\
+b-info\x03\0\x03\x04\0\x0bbrowser-tab\x03\x01\x01h\0\x01@\x01\x04self\x06\0s\x04\
+\0\x1a[method]browser-context.id\x01\x07\x01p\x02\x01@\x01\x04self\x06\0\x08\x04\
+\0'[method]browser-context.list-extensions\x01\x09\x01j\0\x01s\x01@\x02\x04self\x06\
+\x0cextension-ids\0\x0a\x04\0.[method]browser-context.toggle-extension-popup\x01\
+\x0b\x01h\x05\x01@\x01\x04self\x0c\0s\x04\0\x16[method]browser-tab.id\x01\x0d\x01\
+@\x02\x04self\x0c\x03urls\0\x0a\x04\0\x1c[method]browser-tab.navigate\x01\x0e\x04\
+\0\x1f[method]browser-tab.current-url\x01\x0d\x04\0\x19[method]browser-tab.title\
+\x01\x0d\x01@\x01\x04self\x0c\x01\0\x04\0\x19[method]browser-tab.close\x01\x0f\x01\
+j\x01s\x01s\x01@\x01\x04self\x0c\0\x10\x04\0\x20[method]browser-tab.snapshot-dom\
+\x01\x11\x01@\x02\x04self\x0c\x06scripts\0\x10\x04\0![method]browser-tab.inject-\
+script\x01\x12\x01@\x02\x04self\x0c\x04specs\0\x10\x04\0\x1a[method]browser-tab.\
+anchor\x01\x13\x03\0\x16rashomon:browser/types\x05\x09\x02\x03\0\x04\x0fbrowser-\
+context\x02\x03\0\x04\x0bbrowser-tab\x02\x03\0\x04\x08tab-info\x01B\x13\x02\x03\x02\
+\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x0bbrowser-t\
+ab\x03\0\x02\x02\x03\x02\x01\x0c\x04\0\x08tab-info\x03\0\x04\x01i\x01\x01@\0\0\x06\
+\x04\0\x0ecreate-context\x01\x07\x01h\x01\x01i\x03\x01@\x02\x07context\x08\x03ur\
+ls\0\x09\x04\0\x0acreate-tab\x01\x0a\x01p\x05\x01@\x01\x07context\x08\0\x0b\x04\0\
+\x09list-tabs\x01\x0c\x01k\x09\x01@\x02\x07context\x08\x06tab-ids\0\x0d\x04\0\x07\
+get-tab\x01\x0e\x03\0\x18rashomon:browser/control\x05\x0d\x01B\x07\x01@\x01\x07n\
+ode-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0chandle-\
+input\x01\x02\x01@\0\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:facet/con\
+tract\x05\x0e\x04\0\x1crashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bfacet\
+-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227\
+.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

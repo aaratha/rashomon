@@ -17,7 +17,9 @@ exclude = [
     "components/shell",
     "components/terminal",
     "components/terminal-xterm",
+    "components/browser",
     "crates/cef-spike",
+    "crates/cef-extension-spike",
 ]
 
 [workspace.package]

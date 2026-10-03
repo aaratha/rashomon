@@ -1,18 +1,64 @@
 package rashomon:browser;
 
 /// Backed natively by CEF; never embedded in WASM itself. A
-/// `browser-context` is a persistent profile (cookies, cache, logins);
-/// a `browser-tab` is one navigable surface within a context — named
-/// `tab`, not `view`, so this low-level handle isn't confused with a
-/// Core Model *View* (an open instance of a Facet).
-/// Signatures only — no bodies are implemented yet.
+/// `browser-context` is a persistent profile (cookies, cache, logins,
+/// and the fixed set of extensions the kernel loaded at startup — see
+/// `extension-info` below); a `browser-tab` is one navigable surface
+/// within a context — named `tab`, not `view`, so this low-level
+/// handle isn't confused with a Core Model *View* (an open instance of
+/// a Facet). Settled by hands-on CEF spiking (see `cef-extension-spike`):
+/// every tab and every extension popup is a plain `RuntimeStyle::ALLOY`
+/// browser — there is no Chrome-style toolbar/tab-strip anywhere in
+/// this design, since a single native window can host only one
+/// Chrome-style `BrowserView` for its entire lifetime, which rules out
+/// swappable Chrome-style tabs outright. `navigate`/`current-url`/
+/// `create-tab` have settled signatures; `snapshot-dom`/
+/// `inject-script`/`anchor` are signatures only still — no bodies yet.
 interface types {
     resource browser-context {
         id: func() -> string;
+
+        /// The kernel's extensions are loaded once at startup via
+        /// CEF's `--load-extension` command-line switch (CEF's own
+        /// dynamic, per-context extension-loading API was removed
+        /// around the versions this project targets — confirmed by
+        /// inspecting the raw bindings directly). So this list is
+        /// fixed for the process's lifetime; there is no
+        /// `load-extension` call here to pair with it.
+        list-extensions: func() -> list<extension-info>;
+
+        /// Opens (or, if already open, closes) the given extension's
+        /// popup UI — a toggle, not two separate calls, so the host
+        /// can guard against the "open" path racing itself when
+        /// pressed twice before the first popup browser finishes
+        /// creating. Implemented as a dedicated `RuntimeStyle::ALLOY`
+        /// browser whose *initial* URL is the extension's own
+        /// `chrome-extension://<id>/<popup page>` — proven to render
+        /// real extension UIs (including Bitwarden's) with zero
+        /// cooperation from the extension's own code, unlike
+        /// `chrome.action.openPopup()` (which needs a Chrome-style
+        /// toolbar and a real user gesture, neither of which this
+        /// design has) or navigating an *existing* tab to that URL
+        /// (blocked outright by Chrome's extension-popup guard).
+        toggle-extension-popup: func(extension-id: string) -> result<_, string>;
+    }
+
+    /// Enough for a sidebar to render one icon per installed
+    /// extension and reflect whether its popup is currently open —
+    /// deliberately not the full `chrome.management` shape, which
+    /// this design has no other use for yet.
+    record extension-info {
+        id: string,
+        name: string,
+        popup-open: bool,
     }
 
     resource browser-tab {
+        id: func() -> string;
         navigate: func(url: string) -> result<_, string>;
+        current-url: func() -> string;
+        title: func() -> string;
+        close: func();
         snapshot-dom: func() -> result<string, string>;
         inject-script: func(script: string) -> result<string, string>;
         anchor: func(spec: string) -> result<string, string>;
@@ -21,10 +67,23 @@ interface types {
 
 /// Named `control` (the doc's own term, "browser control"), not
 /// `browser`, so it isn't redundant with the enclosing `rashomon:browser`
-/// package.
+/// package. There's exactly one `browser-context` for now (the kernel's
+/// one user profile) — `create-context` is still named for a future
+/// where that isn't true, but every call during this pass is expected
+/// to reuse the one made at kernel startup, not make a second one.
+///
+/// Deliberately no `list-tabs`/`get-tab` here: a `browser-tab` is an
+/// *owned* resource handle, and the Component Model has no sound way
+/// to hand out a second owning handle to the same one (every owner
+/// dropping its handle tries to destroy the same underlying browser).
+/// The Facet Component that calls `create-tab` keeps whichever handles
+/// it creates for as long as it needs them; a shared, cross-instance
+/// tab *registry* (for a tab-switcher UI, say) is a real but separate
+/// need, better designed alongside the actual switching mechanics (see
+/// the task that adds sleep/swap to the Kernel) than speculatively here.
 interface control {
     use types.{browser-context, browser-tab};
 
     create-context: func() -> browser-context;
-    create-tab: func(context: borrow<browser-context>) -> browser-tab;
+    create-tab: func(context: borrow<browser-context>, url: string) -> browser-tab;
 }
