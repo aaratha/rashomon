@@ -47,6 +47,12 @@ pub trait GraphStore {
     fn create_edge(&mut self, edge_type: &str, source: &str, target: &str, confidence: f32) -> Edge;
     fn query_edges_from(&self, node_id: &str) -> Vec<Edge>;
     fn query_edges_to(&self, node_id: &str) -> Vec<Edge>;
+    /// Every Node that currently exists — needed by anything that
+    /// browses/visualizes the whole graph rather than following edges
+    /// from an already-known starting point.
+    fn all_nodes(&self) -> Vec<Node>;
+    /// Every Edge that currently exists — same reasoning as `all_nodes`.
+    fn all_edges(&self) -> Vec<Edge>;
 }
 
 #[derive(Debug, Default)]
@@ -100,6 +106,14 @@ impl GraphStore for InMemoryGraphStore {
 
     fn query_edges_to(&self, node_id: &str) -> Vec<Edge> {
         self.edges.values().filter(|e| e.target == node_id).cloned().collect()
+    }
+
+    fn all_nodes(&self) -> Vec<Node> {
+        self.nodes.values().cloned().collect()
+    }
+
+    fn all_edges(&self) -> Vec<Edge> {
+        self.edges.values().cloned().collect()
     }
 }
 
@@ -246,6 +260,14 @@ impl GraphStore for PersistentGraphStore {
             .edges_directed(idx, Direction::Incoming)
             .map(|e| e.weight().clone())
             .collect()
+    }
+
+    fn all_nodes(&self) -> Vec<Node> {
+        self.graph.node_weights().cloned().collect()
+    }
+
+    fn all_edges(&self) -> Vec<Edge> {
+        self.graph.edge_weights().cloned().collect()
     }
 }
 

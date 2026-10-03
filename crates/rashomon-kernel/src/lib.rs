@@ -166,6 +166,14 @@ impl rashomon::graph::store::Host for KernelState {
             .map(to_wit_edge)
             .collect()
     }
+
+    fn list_nodes(&mut self) -> Vec<rashomon::graph::types::Node> {
+        self.graph.all_nodes().into_iter().map(to_wit_node).collect()
+    }
+
+    fn list_edges(&mut self) -> Vec<rashomon::graph::types::Edge> {
+        self.graph.all_edges().into_iter().map(to_wit_edge).collect()
+    }
 }
 
 /// The `rashomon:process` resource backing: a real PTY (`portable-pty`),
@@ -1674,6 +1682,7 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let terminal_xterm_wasm_path = ensure_component_built("terminal-xterm")?;
     let browser_wasm_path = ensure_component_built("browser")?;
     let sidebar_wasm_path = ensure_component_built("sidebar")?;
+    let graph_view_wasm_path = ensure_component_built("graph-view")?;
     let graph_db_path = graph_db_path()?;
 
     let engine = Engine::default();
@@ -1812,9 +1821,19 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let sidebar_component = Component::from_file(&engine, &sidebar_wasm_path)
         .map_err(|e| anyhow!("failed to load component at {}: {e}", sidebar_wasm_path.display()))?;
 
+    // Unlike `sidebar`, this one needs no special mounting target at
+    // all — it's just another tab in the switcher, opened via
+    // `Kernel::open_view` exactly like `terminal-xterm` (see
+    // `initial_views` below). It doesn't write to the graph itself, so
+    // the `node_id` it's rendered against doesn't need to mean
+    // anything in particular.
+    let graph_view_component = Component::from_file(&engine, &graph_view_wasm_path)
+        .map_err(|e| anyhow!("failed to load component at {}: {e}", graph_view_wasm_path.display()))?;
+
     let mut facets = HashMap::new();
     facets.insert("terminal-xterm".to_string(), terminal_xterm_component);
     facets.insert("sidebar".to_string(), sidebar_component);
+    facets.insert("graph-view".to_string(), graph_view_component);
 
     // `store` moves into the bridge here — every further call into any
     // Component's `render`/`handle-input`/`poll-output` goes through
@@ -1838,8 +1857,13 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     // One `terminal-xterm` View, mirrored into two Windows: typing in
     // either reaches the same PTY, and output (including the PTY's own
     // echo of that input) is fanned out to both — see `ViewHandle` and
-    // `Kernel::open_window`.
-    let initial_views = Arc::new(vec![(mirrored_thread, "terminal-xterm".to_string(), 2u32)]);
+    // `Kernel::open_window`. `graph-view` reuses `thread_id` (already
+    // created above) purely because `render()` needs *some* node id —
+    // it shows the whole graph, not `thread_id`'s neighborhood.
+    let initial_views = Arc::new(vec![
+        (mirrored_thread, "terminal-xterm".to_string(), 2u32),
+        (thread_id, "graph-view".to_string(), 1u32),
+    ]);
 
     let mut app = KernelApp::new(
         Some(kernel),

@@ -19,6 +19,7 @@ exclude = [
     "components/terminal-xterm",
     "components/browser",
     "components/sidebar",
+    "components/graph-view",
     "crates/cef-spike",
     "crates/cef-extension-spike",
 ]

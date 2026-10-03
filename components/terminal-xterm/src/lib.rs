@@ -12,6 +12,15 @@ thread_local! {
     static SESSION: RefCell<Option<Process>> = const { RefCell::new(None) };
 }
 
+/// Vendored, not loaded from a CDN `<script src>` — this Facet is core
+/// local tooling (a terminal emulator), not something that should
+/// stop working without a live internet connection just because of
+/// how its UI library happens to be fetched. Embedded into the
+/// compiled Component itself via `include_str!`, so the served page
+/// below inlines the actual source instead of a URL.
+const XTERM_JS: &str = include_str!("../vendor/xterm.js");
+const XTERM_CSS: &str = include_str!("../vendor/xterm.css");
+
 struct Component;
 
 impl Guest for Component {
@@ -129,12 +138,12 @@ fn render_page(initial_output: &str) -> String {
 <html>
 <head>
 <meta charset="utf-8" />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css" />
+<style>{xterm_css}</style>
 <style>html, body {{ margin: 0; background: #202830; }}</style>
 </head>
 <body>
 <div id="terminal"></div>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
+<script>{xterm_js}</script>
 <script>
   const term = new Terminal({{ cols: 80, rows: 24 }});
   term.open(document.getElementById('terminal'));
@@ -182,6 +191,8 @@ fn render_page(initial_output: &str) -> String {
 </body>
 </html>"#,
         initial = js_string_escape(initial_output),
+        xterm_css = XTERM_CSS,
+        xterm_js = XTERM_JS,
     )
 }
 

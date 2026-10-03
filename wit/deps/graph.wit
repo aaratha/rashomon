@@ -52,4 +52,10 @@ interface store {
     create-edge: func(edge-type: string, source: string, target: string, confidence: f32) -> edge;
     query-edges-from: func(node-id: string) -> list<edge>;
     query-edges-to: func(node-id: string) -> list<edge>;
+    /// Every Node that currently exists — for a Facet that browses or
+    /// visualizes the whole graph (a graph-inspector View, say) rather
+    /// than following edges out from an already-known starting point.
+    list-nodes: func() -> list<node>;
+    /// Every Edge that currently exists — same reasoning as `list-nodes`.
+    list-edges: func() -> list<edge>;
 }

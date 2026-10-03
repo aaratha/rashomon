@@ -1,0 +1,25 @@
+[package]
+name = "graph-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "rashomon:graph-view"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "facet-world"
+
+[package.metadata.component.target.dependencies]
+"rashomon:graph" = { path = "../../wit/deps/graph.wit" }
+"rashomon:facet" = { path = "../../wit/deps/facet.wit" }
+"rashomon:process" = { path = "../../wit/deps/process.wit" }
+"rashomon:browser" = { path = "../../wit/deps/browser.wit" }
+
+[package.metadata.component.dependencies]
