@@ -20,6 +20,7 @@ exclude = [
     "components/browser",
     "components/sidebar",
     "components/graph-view",
+    "components/extensions",
     "crates/cef-spike",
     "crates/cef-extension-spike",
 ]

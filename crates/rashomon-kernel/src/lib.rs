@@ -74,6 +74,7 @@ use cef::*;
 use directories::ProjectDirs;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use rashomon_graph::GraphStore;
+use serde::{Deserialize, Serialize};
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -102,9 +103,13 @@ struct KernelState {
     wasi_ctx: WasiCtx,
     table: ResourceTable,
     /// The extensions this process loaded at startup (see
-    /// [`BrowserExtensionConfig`]) — empty until a real extension-
-    /// configuration system exists.
+    /// [`BrowserExtensionConfig`]) — from the persisted config file,
+    /// empty on a fresh install until something's been added.
     extensions: Arc<Vec<ExtensionRuntime>>,
+    /// Computed once at startup — extensions found already installed
+    /// in another browser, not yet added to `extensions`'s backing
+    /// config file. See [`discover_extension_candidates`].
+    extension_candidates: Arc<Vec<ExtensionCandidate>>,
     /// `None` until [`open_browser_switcher_window`] builds the one
     /// native window every tab gets mounted into — `create_tab` must
     /// never be called before that happens (see
@@ -332,23 +337,226 @@ impl rashomon::process::spawner::Host for KernelState {
 /// hands-on CEF spiking in `cef-extension-spike`: CEF's own dynamic,
 /// per-context extension-loading embedder API was removed around the
 /// versions this project targets, so the command-line switch at
-/// process startup is the only way left to load one at all. There's no
-/// persisted extension-configuration system yet, so `run_browser_process`
-/// currently passes an empty list — this struct and the plumbing around
-/// it are real, just unpopulated until that system exists.
-#[derive(Clone)]
+/// process startup is the only way left to load one at all, which
+/// means adding/removing an extension can never take effect live —
+/// only on the next restart (see `add_extension`/`remove_extension`
+/// below). Loaded from the persisted config file (see
+/// `load_configured_extensions`) — editable by hand, but normally
+/// built up via the "extensions" Facet's add/remove buttons, fed by
+/// [`discover_extension_candidates`] so a user never has to locate or
+/// type a path themselves for anything already installed in another
+/// browser on their machine.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserExtensionConfig {
     pub path: PathBuf,
     /// Fixed by the `key` field in the extension's own `manifest.json`
-    /// (every extension that expects to be loaded this way needs one,
-    /// or `--load-extension` derives an id from its path instead,
-    /// which isn't stable enough to hardcode here).
+    /// — every extension this kernel supports needs one. Extensions
+    /// without a `key` get an id Chromium derives from a hash of their
+    /// path instead, which this project deliberately doesn't try to
+    /// replicate (no way to verify it matches CEF's own computation
+    /// short of trial and error) — [`discover_extension_candidates`]
+    /// skips anything missing a `key`, and manually-added extensions
+    /// need one too.
     pub id: String,
     pub name: String,
     /// Relative to the extension's root — from its own
     /// `manifest.json`'s `action.default_popup`, e.g.
-    /// `"popup/index.html"` for Bitwarden.
-    pub popup_page: String,
+    /// `"popup/index.html"` for Bitwarden. `None` for an extension
+    /// with no popup UI at all (still loadable — `toggle_extension_popup`
+    /// just has nothing to do for it).
+    pub popup_page: Option<String>,
+}
+
+/// One extension found already installed in some other Chromium-based
+/// browser on this machine (see [`discover_extension_candidates`]),
+/// not yet added to this kernel's own [`BrowserExtensionConfig`] list
+/// — offered as a one-click "Add" in the "extensions" Facet instead of
+/// requiring the user to locate/type a path, which is the actual
+/// problem this whole discovery mechanism exists to avoid.
+#[derive(Clone)]
+pub struct ExtensionCandidate {
+    pub id: String,
+    pub name: String,
+    pub source_browser: String,
+    pub popup_page: Option<String>,
+    pub path: PathBuf,
+}
+
+/// Known macOS Chromium-based browser profile roots to scan for
+/// already-installed extensions under `<root>/Default/Extensions/
+/// <extension-id>/<version>/` — the same set manually confirmed during
+/// this project's own CEF extension spike (Chrome, Brave, Edge,
+/// Helium, and Comet all had Bitwarden installed under one of these on
+/// the machine this was developed on). Not exhaustive (other profile
+/// directories like "Profile 1", other OSes, other browsers entirely)
+/// — covers the common case without trying to be a universal browser
+/// detector.
+#[cfg(target_os = "macos")]
+const BROWSER_PROFILE_ROOTS: &[(&str, &str)] = &[
+    ("Chrome", "Google/Chrome/Default/Extensions"),
+    ("Chrome Canary", "Google/Chrome Canary/Default/Extensions"),
+    ("Brave", "BraveSoftware/Brave-Browser/Default/Extensions"),
+    ("Edge", "Microsoft Edge/Default/Extensions"),
+    ("Helium", "net.imput.helium/Default/Extensions"),
+    ("Comet", "Comet/Default/Extensions"),
+];
+
+/// Scans every known browser profile location (see
+/// `BROWSER_PROFILE_ROOTS`) for already-installed extensions with a
+/// `key` in their manifest — anything without one is skipped rather
+/// than guessing at Chromium's path-hash id-derivation algorithm (see
+/// `BrowserExtensionConfig::id`'s doc comment).
+#[cfg(target_os = "macos")]
+fn discover_extension_candidates() -> Vec<ExtensionCandidate> {
+    let Some(base_dirs) = directories::BaseDirs::new() else { return Vec::new() };
+    let app_support = base_dirs.home_dir().join("Library/Application Support");
+
+    let mut candidates = Vec::new();
+    for (browser_name, relative) in BROWSER_PROFILE_ROOTS {
+        let extensions_dir = app_support.join(relative);
+        let Ok(entries) = std::fs::read_dir(&extensions_dir) else { continue };
+        for entry in entries.flatten() {
+            let id_dir = entry.path();
+            if !id_dir.is_dir() {
+                continue;
+            }
+            let Some(id) = id_dir.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(version_dir) = latest_version_dir(&id_dir) else { continue };
+            let Some((name, popup_page)) = read_keyed_extension_manifest(&version_dir) else { continue };
+
+            candidates.push(ExtensionCandidate {
+                id: id.to_string(),
+                name,
+                source_browser: browser_name.to_string(),
+                popup_page,
+                path: version_dir,
+            });
+        }
+    }
+    candidates
+}
+
+#[cfg(not(target_os = "macos"))]
+fn discover_extension_candidates() -> Vec<ExtensionCandidate> {
+    Vec::new()
+}
+
+/// An extension's own directory can hold more than one version
+/// subdirectory (Chromium prunes old ones but not always
+/// immediately) — sorting lexically and taking the last one is a
+/// reasonable approximation of "newest" without a real version-string
+/// comparison, which isn't worth the complexity for this.
+#[cfg(target_os = "macos")]
+fn latest_version_dir(id_dir: &Path) -> Option<PathBuf> {
+    let mut versions: Vec<PathBuf> = std::fs::read_dir(id_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    versions.sort();
+    versions.pop()
+}
+
+/// Reads `manifest.json` from `version_dir`, returning `None` if
+/// there's no `key` field (see `BrowserExtensionConfig::id`'s doc
+/// comment for why) or if it's Manifest V2 — confirmed earlier (via
+/// `cef-extension-spike`) that this CEF build rejects MV2 outright
+/// ("Cannot install extension because it uses an unsupported manifest
+/// version"), so offering one as a candidate at all would just walk
+/// the user into that dead end after already clicking Add and
+/// restarting. Resolves a Chrome i18n placeholder name like
+/// `__MSG_extName__` against `_locales/<default_locale>/messages.json`
+/// — Bitwarden's own `name` field is exactly this, not a literal
+/// string, so without resolving it the discovered extension would
+/// show up labeled `"__MSG_extName__"` instead of "Bitwarden".
+#[cfg(target_os = "macos")]
+fn read_keyed_extension_manifest(version_dir: &Path) -> Option<(String, Option<String>)> {
+    let text = std::fs::read_to_string(version_dir.join("manifest.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+
+    manifest.get("key")?.as_str()?;
+    if manifest.get("manifest_version").and_then(|v| v.as_i64()) != Some(3) {
+        return None;
+    }
+
+    let raw_name = manifest.get("name")?.as_str()?;
+    let default_locale = manifest.get("default_locale").and_then(|v| v.as_str());
+    let name = resolve_i18n_message(raw_name, version_dir, default_locale);
+
+    let popup_page = manifest
+        .get("action")
+        .and_then(|a| a.get("default_popup"))
+        .and_then(|p| p.as_str())
+        .map(|s| s.to_string());
+
+    Some((name, popup_page))
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_i18n_message(raw: &str, version_dir: &Path, default_locale: Option<&str>) -> String {
+    let Some(key) = raw.strip_prefix("__MSG_").and_then(|s| s.strip_suffix("__")) else {
+        return raw.to_string();
+    };
+    let locale = default_locale.unwrap_or("en");
+    let messages_path = version_dir.join("_locales").join(locale).join("messages.json");
+    let Ok(text) = std::fs::read_to_string(&messages_path) else { return raw.to_string() };
+    let Ok(messages) = serde_json::from_str::<serde_json::Value>(&text) else { return raw.to_string() };
+    messages
+        .as_object()
+        .and_then(|obj| obj.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)))
+        .and_then(|(_, v)| v.get("message"))
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExtensionConfigFile {
+    extensions: Vec<BrowserExtensionConfig>,
+}
+
+fn extensions_config_path() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("dev", "rashomon", "rashomon")
+        .context("could not determine a data directory for this OS/user")?;
+    let data_dir = dirs.data_dir();
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
+    Ok(data_dir.join("extensions.json"))
+}
+
+/// Empty (not an error) if the file doesn't exist yet — a fresh
+/// install has configured zero extensions until the "extensions"
+/// Facet's "Add" button (or hand-editing the file) puts some there.
+fn load_configured_extensions() -> Result<Vec<BrowserExtensionConfig>> {
+    let path = extensions_config_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let file: ExtensionConfigFile =
+        serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(file.extensions)
+}
+
+fn save_configured_extensions(extensions: &[BrowserExtensionConfig]) -> Result<()> {
+    let path = extensions_config_path()?;
+    let file = ExtensionConfigFile { extensions: extensions.to_vec() };
+    let text = serde_json::to_string_pretty(&file).context("failed to serialize extension config")?;
+    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Re-checks a *configured* extension's manifest version at load
+/// time, not just at discovery time — so one that was added before
+/// this check existed (true for anyone who hit the "unsupported
+/// manifest version" warning before this existed), or whose source
+/// browser later updated it to MV2 for some reason, doesn't keep
+/// getting silently handed to `--load-extension` and rejected by CEF
+/// on every single startup.
+fn configured_extension_is_valid(config: &BrowserExtensionConfig) -> bool {
+    let Ok(text) = std::fs::read_to_string(config.path.join("manifest.json")) else { return false };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    manifest.get("manifest_version").and_then(|v| v.as_i64()) == Some(3)
 }
 
 /// Tracks one extension's popup lifecycle. `Opening` exists because
@@ -430,6 +638,10 @@ fn toggle_extension_popup_impl(ext: &ExtensionRuntime) -> Result<(), String> {
         }
         PopupState::Opening => Err("popup already opening".to_string()),
         PopupState::Closed => {
+            let Some(popup_page) = &ext.config.popup_page else {
+                drop(state);
+                return Err(format!("{} has no popup page", ext.config.name));
+            };
             *state = PopupState::Opening;
             drop(state);
             let mut popup_client = ExtensionPopupClient::new(ext.popup.clone());
@@ -438,9 +650,8 @@ fn toggle_extension_popup_impl(ext: &ExtensionRuntime) -> Result<(), String> {
                 ..Default::default()
             };
             let settings = BrowserSettings::default();
-            let url = CefString::from(
-                format!("chrome-extension://{}/{}", ext.config.id, ext.config.popup_page).as_str(),
-            );
+            let url =
+                CefString::from(format!("chrome-extension://{}/{}", ext.config.id, popup_page).as_str());
             browser_host_create_browser(
                 Some(&window_info),
                 Some(&mut popup_client),
@@ -757,7 +968,8 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
         &mut self,
         _self_: Resource<BrowserContext>,
     ) -> Vec<rashomon::browser::types::ExtensionInfo> {
-        self.extensions
+        let mut extensions: Vec<_> = self
+            .extensions
             .iter()
             .map(|ext| rashomon::browser::types::ExtensionInfo {
                 id: ext.config.id.clone(),
@@ -767,7 +979,9 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
                     PopupState::Open(..)
                 ),
             })
-            .collect()
+            .collect();
+        extensions.sort_by(|a, b| a.name.cmp(&b.name));
+        extensions
     }
 
     fn toggle_extension_popup(
@@ -824,6 +1038,66 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
         let mut task = SwitchTabTask::new(self.browser_switcher.clone(), tab_id);
         post_task(ThreadId::UI, Some(&mut task));
         Ok(())
+    }
+
+    /// Filters against the *persisted config file*, not `self.extensions`
+    /// (the live, active-this-session list, fixed since startup) — so
+    /// adding or removing an extension is reflected here on the very
+    /// next poll, rather than only after a restart. `self.extensions`
+    /// not changing until restart is still correct for `list_extensions`
+    /// itself (it reflects what's actually loaded right now); this is
+    /// specifically about which candidates are still worth offering.
+    fn list_extension_candidates(
+        &mut self,
+        _self_: Resource<BrowserContext>,
+    ) -> Vec<rashomon::browser::types::ExtensionCandidate> {
+        let configured_ids: std::collections::HashSet<String> = load_configured_extensions()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|ext| ext.id)
+            .collect();
+        let mut candidates: Vec<_> = self
+            .extension_candidates
+            .iter()
+            .filter(|candidate| !configured_ids.contains(&candidate.id))
+            .map(|candidate| rashomon::browser::types::ExtensionCandidate {
+                id: candidate.id.clone(),
+                name: candidate.name.clone(),
+                source_browser: candidate.source_browser.clone(),
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.name.cmp(&b.name));
+        candidates
+    }
+
+    fn add_extension(&mut self, _self_: Resource<BrowserContext>, candidate_id: String) -> Result<(), String> {
+        let candidate = self
+            .extension_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| format!("unknown candidate id: {candidate_id}"))?;
+
+        let mut configured = load_configured_extensions().map_err(|e| e.to_string())?;
+        if configured.iter().any(|ext| ext.id == candidate.id) {
+            return Err(format!("{} is already added", candidate.name));
+        }
+        configured.push(BrowserExtensionConfig {
+            path: candidate.path.clone(),
+            id: candidate.id.clone(),
+            name: candidate.name.clone(),
+            popup_page: candidate.popup_page.clone(),
+        });
+        save_configured_extensions(&configured).map_err(|e| e.to_string())
+    }
+
+    fn remove_extension(&mut self, _self_: Resource<BrowserContext>, extension_id: String) -> Result<(), String> {
+        let mut configured = load_configured_extensions().map_err(|e| e.to_string())?;
+        let original_len = configured.len();
+        configured.retain(|ext| ext.id != extension_id);
+        if configured.len() == original_len {
+            return Err(format!("not configured: {extension_id}"));
+        }
+        save_configured_extensions(&configured).map_err(|e| e.to_string())
     }
 
     fn drop(&mut self, self_: Resource<BrowserContext>) -> wasmtime::Result<()> {
@@ -1683,6 +1957,7 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let browser_wasm_path = ensure_component_built("browser")?;
     let sidebar_wasm_path = ensure_component_built("sidebar")?;
     let graph_view_wasm_path = ensure_component_built("graph-view")?;
+    let extensions_wasm_path = ensure_component_built("extensions")?;
     let graph_db_path = graph_db_path()?;
 
     let engine = Engine::default();
@@ -1694,21 +1969,32 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
 
     let browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>> = Arc::new(Mutex::new(None));
 
-    // Demo-only, to reproduce `cef-extension-spike`'s validated
-    // tab-switching + popup-toggle behavior end to end through the
-    // real primitive: reuses the Bitwarden copy that spike already
-    // validated (`crates/cef-extension-spike/bitwarden-extension/`,
-    // itself copied from this machine's own Brave profile, gitignored)
-    // rather than duplicating a ~70MB third-party extension into this
-    // crate too. Not portable to a fresh clone that hasn't run that
-    // spike — there's no persisted extension-configuration system yet,
-    // see `BrowserExtensionConfig`'s doc comment.
-    let extension_configs: Arc<Vec<BrowserExtensionConfig>> = Arc::new(vec![BrowserExtensionConfig {
-        path: Path::new(env!("CARGO_MANIFEST_DIR")).join("../cef-extension-spike/bitwarden-extension"),
-        id: "nngceckbapebfimnlniiiahkandclblb".to_string(),
-        name: "Bitwarden".to_string(),
-        popup_page: "popup/index.html".to_string(),
-    }]);
+    // Loaded from the persisted config file, not hardcoded — see
+    // `BrowserExtensionConfig`'s doc comment and the "extensions"
+    // Facet's add/remove buttons, which are the normal way this file
+    // gets populated. Empty (not an error) on a fresh install.
+    let all_configured_extensions = load_configured_extensions().unwrap_or_else(|e| {
+        eprintln!("failed to load extension config: {e}");
+        Vec::new()
+    });
+    let (valid_extensions, invalid_extensions): (Vec<_>, Vec<_>) =
+        all_configured_extensions.into_iter().partition(configured_extension_is_valid);
+    for ext in &invalid_extensions {
+        eprintln!(
+            "extension {:?} at {} is no longer valid (not Manifest V3) — removing from config \
+             automatically rather than handing it to --load-extension and having CEF reject it \
+             on every startup",
+            ext.name,
+            ext.path.display()
+        );
+    }
+    if !invalid_extensions.is_empty() {
+        if let Err(e) = save_configured_extensions(&valid_extensions) {
+            eprintln!("failed to save cleaned-up extension config: {e}");
+        }
+    }
+    let extension_configs: Arc<Vec<BrowserExtensionConfig>> = Arc::new(valid_extensions);
+    let extension_candidates: Arc<Vec<ExtensionCandidate>> = Arc::new(discover_extension_candidates());
     let extensions: Arc<Vec<ExtensionRuntime>> = Arc::new(
         extension_configs
             .iter()
@@ -1724,6 +2010,7 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
             wasi_ctx: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             extensions: extensions.clone(),
+            extension_candidates: extension_candidates.clone(),
             browser_switcher: browser_switcher.clone(),
         },
     );
@@ -1830,10 +2117,15 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let graph_view_component = Component::from_file(&engine, &graph_view_wasm_path)
         .map_err(|e| anyhow!("failed to load component at {}: {e}", graph_view_wasm_path.display()))?;
 
+    // Same as `graph-view`: just another tab, `node_id` unused.
+    let extensions_component = Component::from_file(&engine, &extensions_wasm_path)
+        .map_err(|e| anyhow!("failed to load component at {}: {e}", extensions_wasm_path.display()))?;
+
     let mut facets = HashMap::new();
     facets.insert("terminal-xterm".to_string(), terminal_xterm_component);
     facets.insert("sidebar".to_string(), sidebar_component);
     facets.insert("graph-view".to_string(), graph_view_component);
+    facets.insert("extensions".to_string(), extensions_component);
 
     // `store` moves into the bridge here — every further call into any
     // Component's `render`/`handle-input`/`poll-output` goes through
@@ -1862,7 +2154,8 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     // it shows the whole graph, not `thread_id`'s neighborhood.
     let initial_views = Arc::new(vec![
         (mirrored_thread, "terminal-xterm".to_string(), 2u32),
-        (thread_id, "graph-view".to_string(), 1u32),
+        (thread_id.clone(), "graph-view".to_string(), 1u32),
+        (thread_id, "extensions".to_string(), 1u32),
     ]);
 
     let mut app = KernelApp::new(

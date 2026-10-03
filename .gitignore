@@ -1,8 +1,8 @@
-/target
-components/ping/target
-components/shell/target
-components/terminal/target
-components/terminal-xterm/target
-crates/rashomon-kernel/target
-crates/cef-spike/target
+# Matches a directory named `target` at any depth — every crate and
+# every WASM component has its own, and listing each one individually
+# (the previous approach here) silently misses any new one added
+# later, which is exactly how several components' build artifacts
+# ended up committed.
+target/
+*.app/
 .DS_Store

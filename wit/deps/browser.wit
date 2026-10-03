@@ -42,6 +42,30 @@ interface types {
         /// (blocked outright by Chrome's extension-popup guard).
         toggle-extension-popup: func(extension-id: string) -> result<_, string>;
 
+        /// Extensions found already installed in another Chromium-based
+        /// browser on this machine, not yet added to this kernel's own
+        /// configured list — so a user adding Bitwarden (say) never
+        /// has to locate or type its unpacked-extension path
+        /// themselves, which is impractical for most people. Computed
+        /// once at kernel startup.
+        list-extension-candidates: func() -> list<extension-candidate>;
+
+        /// Adds `candidate-id` (one of `list-extension-candidates`'
+        /// results) to this kernel's own persisted extension config.
+        /// Takes effect on the *next* restart, not immediately — CEF
+        /// only loads extensions via a command-line switch at process
+        /// startup (confirmed in `cef-extension-spike`: its own
+        /// dynamic, per-context extension-loading API was removed
+        /// around the versions this project targets), so there is no
+        /// live-install call to make instead.
+        add-extension: func(candidate-id: string) -> result<_, string>;
+
+        /// Removes a previously-added extension (by the same id
+        /// `list-extensions`/`add-extension` use) from the persisted
+        /// config. Also takes effect on next restart, same reasoning
+        /// as `add-extension`.
+        remove-extension: func(extension-id: string) -> result<_, string>;
+
         /// Data only, never a `browser-tab` handle — see the `control`
         /// interface's own doc comment for why handing out a second
         /// owning handle to the same tab isn't sound. This is exactly
@@ -58,6 +82,15 @@ interface types {
         /// Facet's `switch-tab:<id>` button instead of a native
         /// click handler.
         switch-to-tab: func(tab-id: string) -> result<_, string>;
+    }
+
+    /// An extension found already installed in another browser, not
+    /// yet added to this kernel's own configured list — see
+    /// `browser-context.list-extension-candidates`.
+    record extension-candidate {
+        id: string,
+        name: string,
+        source-browser: string,
     }
 
     /// Enough for a sidebar to render one icon per installed
