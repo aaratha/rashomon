@@ -14,8 +14,11 @@ use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApp, NSApplication, NSApplicationDelegate, NSColor, NSEvent, NSView};
+use objc2_app_kit::{
+    NSApp, NSApplication, NSApplicationDelegate, NSColor, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSView,
+};
 use objc2_core_foundation::CGRect;
+use objc2_foundation::NSString;
 use raw_window_handle::{AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -116,6 +119,86 @@ pub fn setup_kernel_app_delegate() -> Retained<KernelAppDelegate> {
     }
 
     delegate
+}
+
+define_class! {
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    pub struct MenuActionTarget;
+
+    impl MenuActionTarget {
+        #[unsafe(method(newTab:))]
+        unsafe fn new_tab(&self, _sender: Option<&AnyObject>) {
+            crate::request_new_tab();
+        }
+    }
+
+    unsafe impl NSObjectProtocol for MenuActionTarget {}
+}
+
+impl MenuActionTarget {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = MenuActionTarget::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Registers Cmd+T as a "New Tab" menu key equivalent — the only
+/// reliable way to get a keyboard shortcut that fires regardless of
+/// which native view currently has focus. `winit`'s own
+/// `WindowEvent::KeyboardInput` only reaches *this* window's own
+/// top-level handling; once a CEF classic-embedded browser or a `wry`
+/// webview (the sidebar, say) is first responder — which is true
+/// almost all the time, since those cover the entire window — normal
+/// key events go straight to *that* view's own `keyDown:`, never
+/// bubbling up to `winit` at all. Command-key combinations are
+/// different: AppKit always checks the application's main menu for a
+/// matching key equivalent *before* any view gets a chance to handle
+/// the event (`-[NSApplication sendEvent:]`'s own documented
+/// behavior), so a real `NSMenuItem` is what makes this actually work
+/// regardless of focus, not a workaround.
+///
+/// Adds to whatever main menu already exists (`winit` doesn't seem to
+/// set one up on its own, but this doesn't assume that) rather than
+/// replacing it, so nothing else — if anything else is relying on a
+/// main menu — gets clobbered. The returned `MenuActionTarget` must be
+/// kept alive for as long as the menu item exists (it's set as the
+/// item's `target`, a weak/unretained reference under the hood); the
+/// caller holding onto it for the rest of the process's lifetime (the
+/// same pattern `setup_kernel_app_delegate`'s own return value
+/// already relies on) is what keeps it from being deallocated out
+/// from under the menu.
+pub fn setup_new_tab_menu_item() -> Retained<MenuActionTarget> {
+    let mtm = MainThreadMarker::new().expect("not on main thread");
+    let target = MenuActionTarget::new(mtm);
+    let app = NSApp(mtm);
+
+    let main_menu = app.mainMenu().unwrap_or_else(|| {
+        let menu = NSMenu::new(mtm);
+        app.setMainMenu(Some(&menu));
+        menu
+    });
+
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str("New Tab"));
+    item.setKeyEquivalent(&NSString::from_str("t"));
+    item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    unsafe {
+        // `&target` (a `&Retained<MenuActionTarget>`) coerces down to
+        // `&AnyObject` through the chain `define_class!` and objc2's
+        // own `extern_class!` machinery generate:
+        // `MenuActionTarget -> NSObject -> AnyObject`.
+        item.setTarget(Some(&target));
+        item.setAction(Some(sel!(newTab:)));
+    }
+
+    let submenu = NSMenu::new(mtm);
+    submenu.addItem(&item);
+    let top_level_item = NSMenuItem::new(mtm);
+    top_level_item.setSubmenu(Some(&submenu));
+    main_menu.addItem(&top_level_item);
+
+    target
 }
 
 /// Wraps the raw `NSView*` for `winit`'s window's content view (from
@@ -332,6 +415,11 @@ impl FacetWebView {
         // `*mut c_void` captured directly in this closure wouldn't
         // (raw pointers aren't `Send` on their own).
         let parent_handle = *parent;
+        // Owned, not borrowed — the `"new-tab-choice"` branch below
+        // needs to know which tab slot it's morphing (see
+        // `crate::handle_new_tab_choice_from_bridge`), and this
+        // closure outlives `window_id`'s own borrow.
+        let own_tab_id = window_id.to_string();
 
         let webview = wry::WebViewBuilder::new()
             .with_bounds(bounds)
@@ -350,6 +438,22 @@ impl FacetWebView {
                 // need to.
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("start-drag") {
                     start_window_drag(parent_handle.as_raw());
+                    return;
+                }
+                // Also host-chrome, not a Facet request — the
+                // sidebar's "+" button and the new-tab chooser's own
+                // buttons (see `crate::NEW_TAB_CHOOSER_HTML`) both
+                // post these directly rather than through the
+                // `cefQuery`-style `{id, request}` shim below, since
+                // neither is answering a Facet's own `handle-input`.
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("new-tab") {
+                    crate::open_new_tab_chooser_from_bridge(&bridge);
+                    return;
+                }
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("new-tab-choice") {
+                    if let Some(choice) = parsed.get("choice").and_then(|v| v.as_str()) {
+                        crate::handle_new_tab_choice_from_bridge(&bridge, &own_tab_id, choice);
+                    }
                     return;
                 }
                 let Some(webview) = cell_for_ipc.get() else { return };

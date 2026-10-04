@@ -155,6 +155,16 @@ struct KernelState {
     /// (not nested inside whatever call is already holding the lock
     /// while `create_tab` itself runs).
     bridge_handle: Option<Arc<Mutex<InputBridge>>>,
+    /// Same late-binding dance as [`KernelState::bridge_handle`], for
+    /// the same reason: the sidebar's "New Tab" button (and Cmd+T/
+    /// Ctrl+T — see [`request_new_tab`]) both need to call
+    /// [`Kernel::open_view`]/`control::Host::create_tab`'s underlying
+    /// logic to actually open whatever the user picked in
+    /// `open_new_tab_chooser`'s menu, and the sidebar's path to that
+    /// (its IPC handler, set up deep inside `mac::FacetWebView::build`)
+    /// only has `KernelState` reachable to it, not a `Kernel` of its
+    /// own.
+    kernel_handle: Option<Arc<Kernel>>,
 }
 
 impl WasiView for KernelState {
@@ -982,6 +992,31 @@ impl BrowserSwitcherState {
         Ok(())
     }
 
+    /// Swaps `tab_id`'s widget/kind/title in place — the same tab
+    /// slot and position in the switcher's list, now showing entirely
+    /// different content — rather than hiding it and mounting a
+    /// second, separate tab alongside it (see [`handle_new_tab_choice`],
+    /// the only caller: picking an option on the new-tab chooser's own
+    /// page should turn *that* tab into the chosen content, not leave
+    /// the chooser behind as a second tab). Explicitly hides the old
+    /// widget first rather than relying on it being dropped — `wry`'s
+    /// `WebView` holds an internal `Arc` cycle through its own IPC
+    /// handler closure back to itself (see `mac::FacetWebView::new`),
+    /// so `Drop`/`removeFromSuperview` never actually fires; hiding it
+    /// directly beforehand is what every other tab switch already
+    /// does anyway, and doesn't depend on that at all. If `tab_id`
+    /// isn't the active tab this is still correct (just invisible
+    /// until switched to), but every current caller only ever morphs
+    /// whichever tab is active right now.
+    fn replace_tab_widget(&mut self, tab_id: &str, kind: TabKind, title: Arc<Mutex<String>>, widget: TabWidget) {
+        let Some(pos) = self.tabs.iter().position(|tab| tab.id == tab_id) else { return };
+        hide_widget(&self.tabs[pos].widget);
+        self.tabs[pos] = SwitcherTab { id: tab_id.to_string(), kind, title, widget };
+        if pos == self.active_index {
+            self.layout_active();
+        }
+    }
+
     /// Positions/shows the currently active tab's widget at the
     /// content rect appropriate for its kind (leaving room for the
     /// urlbar above it iff it's a `TabKind::Browser` tab), and syncs
@@ -1572,40 +1607,71 @@ impl rashomon::browser::control::Host for KernelState {
     /// stash an async `on_after_created` callback's result in the
     /// meantime.
     fn create_tab(&mut self, _context: Resource<BrowserContext>, url: String) -> Resource<BrowserTab> {
-        let title = Arc::new(Mutex::new(String::new()));
         let bridge_handle = self
             .bridge_handle
             .clone()
             .expect("bridge_handle set immediately after InputBridge construction, before any Facet ever runs");
-        let mut client = TabClient::new(title.clone(), bridge_handle, Arc::new(Mutex::new(None)));
-        let native_parent_and_rect = self
-            .browser_switcher
-            .lock()
-            .expect("browser switcher lock poisoned")
-            .as_ref()
-            .map(|s| (s.native_parent, s.content_rect_below_urlbar()));
-        let window_info = native_parent_and_rect
-            .map(|(parent, rect)| WindowInfo::default().set_as_child(parent, &rect))
-            .unwrap_or_default();
-        let settings = BrowserSettings::default();
-        let cef_url = CefString::from(url.as_str());
-        let browser = browser_host_create_browser_sync(
-            Some(&window_info),
-            Some(&mut client),
-            Some(&cef_url),
-            Some(&settings),
-            None,
-            None,
-        )
-        .expect("browser_host_create_browser_sync failed");
-
-        let id = format!("tab-{}", next_tab_id());
-        mount_tab(id.clone(), &self.browser_switcher, TabWidget::Browser(browser.clone()), title.clone(), TabKind::Browser);
+        let (id, browser, title) = create_browser_tab_native(&self.browser_switcher, bridge_handle, &url);
 
         self.table
             .push(BrowserTab { id, browser, title })
             .expect("resource table push failed")
     }
+}
+
+/// The actual CEF `WindowInfo`/`BrowserSettings`/
+/// `browser_host_create_browser_sync` mechanics both `create_tab` (the
+/// `rashomon:browser` Host impl) and [`create_browser_tab_native`]
+/// need — factored out one level further than that so
+/// [`handle_new_tab_choice`]'s "browser" option can build a `Browser`
+/// to morph the chooser's own tab slot into via
+/// [`BrowserSwitcherState::replace_tab_widget`], without `mount_tab`
+/// minting it a brand new slot of its own.
+fn build_browser_widget(
+    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
+    bridge_handle: Arc<Mutex<InputBridge>>,
+    url: &str,
+) -> (Browser, Arc<Mutex<String>>) {
+    let title = Arc::new(Mutex::new(String::new()));
+    let mut client = TabClient::new(title.clone(), bridge_handle, Arc::new(Mutex::new(None)));
+    let native_parent_and_rect = browser_switcher
+        .lock()
+        .expect("browser switcher lock poisoned")
+        .as_ref()
+        .map(|s| (s.native_parent, s.content_rect_below_urlbar()));
+    let window_info = native_parent_and_rect
+        .map(|(parent, rect)| WindowInfo::default().set_as_child(parent, &rect))
+        .unwrap_or_default();
+    let settings = BrowserSettings::default();
+    let cef_url = CefString::from(url);
+    let browser = browser_host_create_browser_sync(
+        Some(&window_info),
+        Some(&mut client),
+        Some(&cef_url),
+        Some(&settings),
+        None,
+        None,
+    )
+    .expect("browser_host_create_browser_sync failed");
+    (browser, title)
+}
+
+/// Builds a brand-new, independently switchable browser tab — unlike
+/// [`build_browser_widget`] alone, this also mints a fresh tab id and
+/// mounts it via [`mount_tab`]. Used by `create_tab` (the
+/// `rashomon:browser` Host impl), where a Facet explicitly asked for a
+/// new tab of its own, as opposed to [`handle_new_tab_choice`]'s
+/// "browser" option, which morphs an *existing* slot (the chooser's)
+/// instead of minting a new one.
+fn create_browser_tab_native(
+    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
+    bridge_handle: Arc<Mutex<InputBridge>>,
+    url: &str,
+) -> (String, Browser, Arc<Mutex<String>>) {
+    let (browser, title) = build_browser_widget(browser_switcher, bridge_handle, url);
+    let id = format!("tab-{}", next_tab_id());
+    mount_tab(id.clone(), browser_switcher, TabWidget::Browser(browser.clone()), title.clone(), TabKind::Browser);
+    (id, browser, title)
 }
 
 /// Unique across the process, independent of the `ResourceTable`'s own
@@ -1879,6 +1945,40 @@ impl Kernel {
     /// gives you two independent shells, not one shared one —
     /// [`Kernel::open_window`] is what shares one.
     fn open_view(&self, node_id: &str, facet_name: &str) -> Result<String> {
+        let view_id = self.instantiate_view(node_id, facet_name)?;
+        self.open_window(&view_id)?;
+        Ok(view_id)
+    }
+
+    /// Like [`Kernel::open_view`], but mounts the result into an
+    /// *existing* switcher tab slot (`tab_id`, via
+    /// [`BrowserSwitcherState::replace_tab_widget`]) instead of
+    /// minting a new one — used by [`handle_new_tab_choice`] so
+    /// picking a Facet on the new-tab chooser's own page morphs that
+    /// very tab into it, rather than leaving the chooser behind as a
+    /// second, separate tab.
+    fn open_view_into(&self, node_id: &str, facet_name: &str, tab_id: &str) -> Result<()> {
+        let view_id = self.instantiate_view(node_id, facet_name)?;
+        let rect = self
+            .browser_switcher
+            .lock()
+            .expect("browser switcher lock poisoned")
+            .as_ref()
+            .map(|s| s.content_rect_full())
+            .unwrap_or_else(|| content_rect_full(WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX));
+        let (_window_id, widget, title) = self.create_facet_widget(&view_id, rect)?;
+        if let Some(switcher) = self.browser_switcher.lock().expect("browser switcher lock poisoned").as_mut() {
+            switcher.replace_tab_widget(tab_id, TabKind::FacetView, title, widget);
+        }
+        Ok(())
+    }
+
+    /// Instantiates `facet_name` fresh and calls its `render` against
+    /// `node_id`, registering the result as a new View — the common
+    /// first half [`Kernel::open_view`]/[`Kernel::open_view_into`]
+    /// both need, before they diverge on *where* the View's first
+    /// Window gets mounted.
+    fn instantiate_view(&self, node_id: &str, facet_name: &str) -> Result<String> {
         let component = self.facets.component(facet_name)?;
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
 
@@ -1897,9 +1997,6 @@ impl Kernel {
             view_id.clone(),
             ViewHandle { bindings, initial_html, pending: HashMap::new() },
         );
-        drop(bridge);
-
-        self.open_window(&view_id)?;
         Ok(view_id)
     }
 
@@ -2312,6 +2409,31 @@ static PUMP_PROXY: std::sync::OnceLock<winit::event_loop::EventLoopProxy<()>> = 
 /// run at any multiple of that rate the OS allows).
 const PUMP_FALLBACK_INTERVAL: Duration = Duration::from_millis(16);
 
+/// Set by `mac::MenuActionTarget::newTab:` — the Cmd+T/Ctrl+T menu
+/// item's action, dispatched by AppKit's own menu-key-equivalent
+/// handling (checked before any normal view/window event dispatch,
+/// regardless of which CEF-embedded or `wry` child currently has
+/// first-responder focus — see that type's doc comment), not through
+/// `winit`'s own `WindowEvent::KeyboardInput`. Checked and cleared in
+/// `WinitKernelApp::about_to_wait`, which — thanks to
+/// `PUMP_FALLBACK_INTERVAL` — runs at least every 16ms regardless of
+/// whether anything else woke it, so this never waits longer than
+/// that to take effect.
+static NEW_TAB_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called directly from AppKit's main-thread menu dispatch (see
+/// [`NEW_TAB_REQUESTED`]) — just records the request and nudges
+/// `winit`'s loop awake via the same [`PUMP_PROXY`] CEF's own
+/// `on_schedule_message_pump_work` uses, so a chooser opens
+/// immediately rather than waiting out whatever `about_to_wait` was
+/// last told to sleep until.
+pub(crate) fn request_new_tab() {
+    NEW_TAB_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(proxy) = PUMP_PROXY.get() {
+        let _ = proxy.send_event(());
+    }
+}
+
 // `winit` drives the blocking run loop now (see `WinitKernelApp`), so
 // CEF is configured with `external_message_pump: 1` — this handler's
 // job is purely to record *when* CEF next wants `do_message_loop_work()`
@@ -2449,6 +2571,15 @@ struct WinitKernelApp {
     browser_component: Arc<Component>,
     browser_demo_node_id: String,
     window: Option<Window>,
+    /// `None` until [`WinitKernelApp::resumed`] sets it up — kept here
+    /// (not just a local in `resumed`) purely so it isn't dropped
+    /// (which would tear down the Cmd+T `NSMenuItem`'s target along
+    /// with it) for the rest of the process's lifetime. See
+    /// [`mac::setup_new_tab_menu_item`]'s doc comment for why it has
+    /// to be set up from inside `resumed` specifically, not earlier in
+    /// `run_browser_process`.
+    #[cfg(target_os = "macos")]
+    new_tab_menu_target: Option<objc2::rc::Retained<mac::MenuActionTarget>>,
 }
 
 impl WinitKernelApp {
@@ -2493,6 +2624,24 @@ impl ApplicationHandler for WinitKernelApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
+        }
+
+        // Must happen here, not any earlier in `run_browser_process` —
+        // `winit` installs its *own* default main menu bar (see
+        // `winit::platform_impl::macos::app_state`'s
+        // `applicationDidFinishLaunching:`, which calls
+        // `menu::initialize`) during the dispatch that leads into this
+        // very `resumed` call, deliberately *before* dispatching
+        // `NewEvents`/calling into application code — its own doc
+        // comment says this ordering exists specifically "to allow
+        // overriding of the default menu even if it's created." Doing
+        // this any earlier (originally tried right after
+        // `cef::initialize()`, before `EventLoop::new()` even ran) got
+        // silently clobbered by that default menu once the loop
+        // actually started, which is why Cmd+T did nothing.
+        #[cfg(target_os = "macos")]
+        {
+            self.new_tab_menu_target = Some(mac::setup_new_tab_menu_item());
         }
 
         let mut attrs = Window::default_attributes()
@@ -2657,6 +2806,9 @@ impl ApplicationHandler for WinitKernelApp {
     /// `PUMP_FALLBACK_INTERVAL` floor, not as the sole trigger.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         do_message_loop_work();
+        if NEW_TAB_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            open_new_tab_chooser(&self.kernel);
+        }
         let now = Instant::now();
         let requested = NEXT_PUMP_DEADLINE.lock().expect("pump deadline lock poisoned").take();
         let fallback = now + PUMP_FALLBACK_INTERVAL;
@@ -2666,6 +2818,192 @@ impl ApplicationHandler for WinitKernelApp {
         };
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
+}
+
+/// The tab id of the currently-open, not-yet-resolved new-tab
+/// chooser, if any — `None` once a choice has been made, since at
+/// that point [`handle_new_tab_choice`] has already morphed that very
+/// tab slot (see [`BrowserSwitcherState::replace_tab_widget`]) into
+/// real content, so it's no longer a chooser to re-focus. Checked by
+/// [`open_new_tab_chooser`] to decide whether to re-focus a pending
+/// chooser or mint a brand new one; a plain `static`, not per-`Kernel`
+/// state, under the same "one window for now" scoping every other
+/// piece of this module's global state already assumes.
+static PENDING_CHOOSER_TAB_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// The new-tab chooser's entire page — host-authored, not a Facet
+/// Component (see `mac::FacetWebView::build`'s `"new-tab-choice"` IPC
+/// branch, the thing that actually gives these buttons meaning): one
+/// button per Facet `initial_views` already knows how to open, plus a
+/// plain browser page, matching the user's own spec verbatim ("select
+/// between the existing facet options... if I select a browser page,
+/// open google.com").
+const NEW_TAB_CHOOSER_HTML: &str = r#"<!doctype html>
+<html>
+<head><meta charset="utf-8" /></head>
+<body style="margin:0; height:100vh; display:flex; align-items:center; justify-content:center; font-family:-apple-system,sans-serif; color:#eee;">
+<div style="display:flex; flex-direction:column; gap:10px; width:260px;">
+  <h2 style="margin:0 0 6px 0; font-size:16px; font-weight:600;">New Tab</h2>
+  <button data-choice="browser">Browser Page</button>
+  <button data-choice="terminal-xterm">Terminal</button>
+  <button data-choice="graph-view">Graph View</button>
+  <button data-choice="extensions">Extensions</button>
+</div>
+<style>
+  button { padding: 10px 14px; border: none; border-radius: 6px; background: rgba(255,255,255,0.12); color:#eee; cursor:pointer; text-align:left; font-size:14px; transition: background 0.15s ease; }
+  button:hover { background: rgba(255,255,255,0.22); }
+</style>
+<script>
+document.querySelectorAll('button[data-choice]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    window.ipc.postMessage(JSON.stringify({ type: 'new-tab-choice', choice: btn.dataset.choice }));
+  });
+});
+</script>
+</body>
+</html>"#;
+
+/// Opens the new-tab chooser (see [`NEW_TAB_CHOOSER_HTML`]) as a tab
+/// in the shared switcher, or just re-focuses it if one is already
+/// open and still unresolved (see [`PENDING_CHOOSER_TAB_ID`]) —
+/// triggered by Cmd+T/Ctrl+T (via [`request_new_tab`]/
+/// [`NEW_TAB_REQUESTED`]) or the sidebar's own "+" button (via
+/// [`open_new_tab_chooser_from_bridge`]). Always mints a *fresh* tab
+/// id (not a fixed constant) for a brand new chooser: once a choice
+/// is made, [`handle_new_tab_choice`] morphs that exact tab slot into
+/// real content, so reusing a fixed id would risk a later Cmd+T
+/// re-focusing whatever that slot turned into instead of opening a
+/// real chooser.
+#[cfg(target_os = "macos")]
+fn open_new_tab_chooser(kernel: &Arc<Kernel>) {
+    let pending = PENDING_CHOOSER_TAB_ID.lock().expect("pending chooser id lock poisoned").clone();
+    if let Some(tab_id) = pending {
+        let mut guard = kernel.browser_switcher.lock().expect("browser switcher lock poisoned");
+        if let Some(switcher) = guard.as_mut() {
+            if switcher.switch_to_id(&tab_id).is_ok() {
+                return;
+            }
+        }
+    }
+
+    let found = kernel
+        .browser_switcher
+        .lock()
+        .expect("browser switcher lock poisoned")
+        .as_ref()
+        .map(|s| (s.native_window_handle, s.content_rect_full()));
+    let Some((native_window_handle, rect)) = found else {
+        eprintln!("open_new_tab_chooser: no browser switcher window yet");
+        return;
+    };
+
+    let tab_id = format!("chooser-{}", next_tab_id());
+    let title = Arc::new(Mutex::new("New Tab".to_string()));
+    let webview = match mac::FacetWebView::new(
+        &native_window_handle,
+        &tab_id,
+        NEW_TAB_CHOOSER_HTML,
+        cef_rect_to_wry(rect),
+        title.clone(),
+        kernel.bridge.clone(),
+    ) {
+        Ok(webview) => webview,
+        Err(e) => {
+            eprintln!("failed to create new-tab chooser webview: {e}");
+            return;
+        }
+    };
+
+    mount_tab(tab_id.clone(), &kernel.browser_switcher, TabWidget::Facet(webview), title, TabKind::FacetView);
+    let mut guard = kernel.browser_switcher.lock().expect("browser switcher lock poisoned");
+    if let Some(switcher) = guard.as_mut() {
+        let _ = switcher.switch_to_id(&tab_id);
+    }
+    drop(guard);
+    *PENDING_CHOOSER_TAB_ID.lock().expect("pending chooser id lock poisoned") = Some(tab_id);
+}
+
+/// The new-tab chooser is `wry`-hosted (see [`mac::FacetWebView`]),
+/// which is macOS-only for now — same "macOS-only for now" scoping as
+/// the background blur/sidebar drag it's built alongside.
+#[cfg(not(target_os = "macos"))]
+fn open_new_tab_chooser(_kernel: &Arc<Kernel>) {
+    eprintln!("new-tab chooser isn't wired up on this platform yet (wry/FacetWebView are macOS-only for now)");
+}
+
+/// [`open_new_tab_chooser`] needs a `Kernel`, but the sidebar's own
+/// "+" button reaches this through `mac::FacetWebView::build`'s IPC
+/// handler, which only ever has the `InputBridge` it already dispatches
+/// Facet requests through — not a `Kernel` of its own. Recovers one via
+/// [`KernelState::kernel_handle`] (late-bound right after `kernel`
+/// itself is constructed in `run_browser_process`, same two-step dance
+/// as `bridge_handle`).
+#[cfg(target_os = "macos")]
+pub(crate) fn open_new_tab_chooser_from_bridge(bridge: &Arc<Mutex<InputBridge>>) {
+    let kernel = bridge.lock().expect("input bridge lock poisoned").store.data_mut().kernel_handle.clone();
+    let Some(kernel) = kernel else {
+        eprintln!("open_new_tab_chooser_from_bridge: kernel_handle not set yet");
+        return;
+    };
+    open_new_tab_chooser(&kernel);
+}
+
+/// Resolves a choice made on [`NEW_TAB_CHOOSER_HTML`]'s page —
+/// `tab_id` is that very chooser's own switcher slot (captured by
+/// `mac::FacetWebView::new`'s `window_id` and threaded back through
+/// its IPC handler, see [`handle_new_tab_choice_from_bridge`]).
+/// `"browser"` builds a real browser tab at Google (the user's own
+/// spec, verbatim) and morphs `tab_id`'s widget into it via
+/// [`BrowserSwitcherState::replace_tab_widget`]; anything else is
+/// taken as a Facet name already registered in `kernel.facets`
+/// (`terminal-xterm`/`graph-view`/`extensions`) and opened the same
+/// way via [`Kernel::open_view_into`], against a freshly minted
+/// `rashomon:thread` Entity — the same "the `node-id` doesn't need to
+/// mean anything in particular" pattern `initial_views` already uses
+/// for `graph-view`/`extensions`. Either way `tab_id` ends up showing
+/// real content in place, rather than the chooser being hidden and a
+/// *second* tab opened alongside it — so also clears
+/// [`PENDING_CHOOSER_TAB_ID`] first if it was still pointing at this
+/// tab, since this slot is no longer a chooser to re-focus.
+#[cfg(target_os = "macos")]
+fn handle_new_tab_choice(kernel: &Arc<Kernel>, tab_id: &str, choice: &str) {
+    let mut pending = PENDING_CHOOSER_TAB_ID.lock().expect("pending chooser id lock poisoned");
+    if pending.as_deref() == Some(tab_id) {
+        *pending = None;
+    }
+    drop(pending);
+
+    if choice == "browser" {
+        let (browser, title) =
+            build_browser_widget(&kernel.browser_switcher, kernel.bridge.clone(), "https://www.google.com/");
+        if let Some(switcher) = kernel.browser_switcher.lock().expect("browser switcher lock poisoned").as_mut() {
+            switcher.replace_tab_widget(tab_id, TabKind::Browser, title, TabWidget::Browser(browser));
+        }
+        return;
+    }
+
+    let node_id = {
+        let mut bridge = kernel.bridge.lock().expect("input bridge lock poisoned");
+        create_node_in_session(bridge.store.data_mut(), "rashomon:thread", rashomon_graph::Role::Entity, HashMap::new()).id
+    };
+    if let Err(e) = kernel.open_view_into(&node_id, choice, tab_id) {
+        eprintln!("new-tab-choice {choice:?}: failed to open view into {tab_id}: {e}");
+    }
+}
+
+/// Same bridge-to-kernel recovery as [`open_new_tab_chooser_from_bridge`],
+/// for the chooser page's own button clicks — `tab_id` is threaded
+/// through from `mac::FacetWebView::new`'s own `window_id` by its IPC
+/// handler, since this is the one `"new-tab-choice"` message that
+/// needs to know which tab slot sent it.
+#[cfg(target_os = "macos")]
+pub(crate) fn handle_new_tab_choice_from_bridge(bridge: &Arc<Mutex<InputBridge>>, tab_id: &str, choice: &str) {
+    let kernel = bridge.lock().expect("input bridge lock poisoned").store.data_mut().kernel_handle.clone();
+    let Some(kernel) = kernel else {
+        eprintln!("handle_new_tab_choice_from_bridge: kernel_handle not set yet");
+        return;
+    };
+    handle_new_tab_choice(&kernel, tab_id, choice);
 }
 
 /// An `App` with no `Kernel` yet — used for the initial `execute_process`
@@ -2771,6 +3109,10 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
             // two-step, set-it-right-after-construction dance is
             // needed at all.
             bridge_handle: None,
+            // Same two-step dance, same reason — see
+            // `KernelState::kernel_handle`'s doc comment. Set for real
+            // immediately after `kernel` itself is constructed, below.
+            kernel_handle: None,
         },
     );
 
@@ -2948,9 +3290,13 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     bridge.lock().expect("input bridge lock poisoned").store.data_mut().bridge_handle = Some(bridge.clone());
     let kernel = Arc::new(Kernel {
         facets: FacetRegistry { linker, components: facets },
-        bridge,
+        bridge: bridge.clone(),
         browser_switcher: browser_switcher.clone(),
     });
+    // See `KernelState::kernel_handle`'s doc comment for why the
+    // sidebar's "New Tab" IPC path needs this clone of `kernel` itself,
+    // not just the `bridge` it already had.
+    bridge.lock().expect("input bridge lock poisoned").store.data_mut().kernel_handle = Some(kernel.clone());
 
     // One `terminal-xterm` View, mirrored into two Windows: typing in
     // either reaches the same PTY, and output (including the PTY's own
@@ -2996,6 +3342,8 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         browser_component: Arc::new(browser_component),
         browser_demo_node_id,
         window: None,
+        #[cfg(target_os = "macos")]
+        new_tab_menu_target: None,
     };
     event_loop.run_app(&mut winit_app).context("winit run_app failed")?;
 

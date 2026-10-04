@@ -142,12 +142,18 @@ const PAGE: &str = r#"<!doctype html>
      transient `:hover` one, so the icon whose popup is currently open
      stays visually distinct while you're looking at something else. */
   .ext-btn.active { background: rgba(255, 255, 255, 0.16); }
+  /* Sits at the bottom of the tab list, not with the tabs themselves
+     (`#tabs` is rebuilt wholesale on every poll — see `refresh()` —
+     so a button living inside it would get wiped and need
+     re-creating every 500ms for no reason). */
+  #new-tab-btn { margin-top: auto; }
 </style>
 </head>
 <body>
 <div id="sidebar">
   <div id="extensions"></div>
   <div id="tabs"></div>
+  <button id="new-tab-btn" title="New Tab">+ New Tab</button>
 </div>
 <script>
   const windowId = window.__rashomonWindowId || '';
@@ -173,6 +179,15 @@ const PAGE: &str = r#"<!doctype html>
   document.getElementById('sidebar').addEventListener('mousedown', function (e) {
     if (e.target.closest('button, a, input, textarea, select')) return;
     window.ipc.postMessage(JSON.stringify({ type: 'start-drag' }));
+  });
+
+  // Same direct `window.ipc.postMessage` bypass as the drag handler
+  // above, not the `cefQuery`/`query()` shim — opening the new-tab
+  // chooser is a host-chrome action (see `rashomon-kernel`'s
+  // `mac::FacetWebView`'s `"new-tab"` IPC branch), not a Facet
+  // request this Component's own `handle-input` ever sees.
+  document.getElementById('new-tab-btn').addEventListener('click', function () {
+    window.ipc.postMessage(JSON.stringify({ type: 'new-tab' }));
   });
 
   let lastPollKey = '';
