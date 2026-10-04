@@ -23,6 +23,7 @@ exclude = [
     "components/extensions",
     "crates/cef-spike",
     "crates/cef-extension-spike",
+    "crates/cef-winit-spike",
 ]
 
 [workspace.package]

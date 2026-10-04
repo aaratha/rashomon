@@ -2831,6 +2831,47 @@ pub mod rashomon {
                     result12
                 }
             }
+            #[allow(unused_unsafe, clippy::all)]
+            /// The user's own configured interactive shell for this platform
+            /// (e.g. honors `chsh` on Unix) — a Component that just wants "a
+            /// normal shell" should call this instead of hardcoding `bash` (or
+            /// any other shell) directly, so a terminal Facet matches whatever
+            /// the user has actually set as their default.
+            pub fn default_shell() -> _rt::String {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 2 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 2
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:process/spawner")]
+                    unsafe extern "C" {
+                        #[link_name = "default-shell"]
+                        fn wit_import1(_: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0) };
+                    let l2 = *ptr0.add(0).cast::<*mut u8>();
+                    let l3 = *ptr0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len4 = l3;
+                    let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                    let result5 = _rt::string_lift(bytes4);
+                    result5
+                }
+            }
         }
     }
 }
@@ -3259,8 +3300,8 @@ pub(crate) use __export_facet_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2467] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa1\x12\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2490] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb8\x12\x01A\x02\x01\
 A\x15\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
 keys\x05values\x04\0\x08property\x03\0\x02\x01p\x03\x01r\x04\x02ids\x09node-type\
 s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x09edge-\
@@ -3281,39 +3322,39 @@ query-edges-to\x01\x0e\x01p\x03\x01@\0\0\x0f\x04\0\x0alist-nodes\x01\x10\x01@\0\
 \x04self\x01\x04colsy\x04rowsy\0\x07\x04\0\x16[method]process.resize\x01\x08\x01\
 @\x02\x04self\x01\x03sigs\0\x07\x04\0\x16[method]process.signal\x01\x09\x01@\x01\
 \x04self\x01\0z\x04\0\x14[method]process.wait\x01\x0a\x03\0\x16rashomon:process/\
-types\x05\x06\x02\x03\0\x02\x07process\x01B\x08\x02\x03\x02\x01\x07\x04\0\x07pro\
+types\x05\x06\x02\x03\0\x02\x07process\x01B\x0a\x02\x03\x02\x01\x07\x04\0\x07pro\
 cess\x03\0\0\x01ps\x01ks\x01i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\
-\x02\x03cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x03\0\x18rashomon:process/spawner\x05\
-\x08\x01B,\x04\0\x0fbrowser-context\x03\x01\x01r\x03\x02ids\x04names\x0esource-b\
-rowsers\x04\0\x13extension-candidate\x03\0\x01\x01r\x03\x02ids\x04names\x0apopup\
--open\x7f\x04\0\x0eextension-info\x03\0\x03\x01r\x03\x02ids\x03urls\x05titles\x04\
-\0\x08tab-info\x03\0\x05\x04\0\x0bbrowser-tab\x03\x01\x01h\0\x01@\x01\x04self\x08\
-\0s\x04\0\x1a[method]browser-context.id\x01\x09\x01p\x04\x01@\x01\x04self\x08\0\x0a\
-\x04\0'[method]browser-context.list-extensions\x01\x0b\x01j\0\x01s\x01@\x02\x04s\
-elf\x08\x0cextension-ids\0\x0c\x04\0.[method]browser-context.toggle-extension-po\
-pup\x01\x0d\x01p\x02\x01@\x01\x04self\x08\0\x0e\x04\01[method]browser-context.li\
-st-extension-candidates\x01\x0f\x01@\x02\x04self\x08\x0ccandidate-ids\0\x0c\x04\0\
-%[method]browser-context.add-extension\x01\x10\x04\0([method]browser-context.rem\
-ove-extension\x01\x0d\x01p\x06\x01@\x01\x04self\x08\0\x11\x04\0![method]browser-\
-context.list-tabs\x01\x12\x01@\x02\x04self\x08\x06tab-ids\0\x0c\x04\0%[method]br\
-owser-context.switch-to-tab\x01\x13\x01h\x07\x01@\x01\x04self\x14\0s\x04\0\x16[m\
-ethod]browser-tab.id\x01\x15\x01@\x02\x04self\x14\x03urls\0\x0c\x04\0\x1c[method\
-]browser-tab.navigate\x01\x16\x04\0\x1f[method]browser-tab.current-url\x01\x15\x04\
-\0\x19[method]browser-tab.title\x01\x15\x01@\x01\x04self\x14\x01\0\x04\0\x19[met\
-hod]browser-tab.close\x01\x17\x01j\x01s\x01s\x01@\x01\x04self\x14\0\x18\x04\0\x20\
-[method]browser-tab.snapshot-dom\x01\x19\x01@\x02\x04self\x14\x06scripts\0\x18\x04\
-\0![method]browser-tab.inject-script\x01\x1a\x01@\x02\x04self\x14\x04specs\0\x18\
-\x04\0\x1a[method]browser-tab.anchor\x01\x1b\x03\0\x16rashomon:browser/types\x05\
-\x09\x02\x03\0\x04\x0fbrowser-context\x02\x03\0\x04\x0bbrowser-tab\x01B\x0b\x02\x03\
-\x02\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x0bbrows\
-er-tab\x03\0\x02\x01i\x01\x01@\0\0\x04\x04\0\x0ecreate-context\x01\x05\x01h\x01\x01\
-i\x03\x01@\x02\x07context\x06\x03urls\0\x07\x04\0\x0acreate-tab\x01\x08\x03\0\x18\
-rashomon:browser/control\x05\x0c\x01B\x07\x01@\x01\x07node-ids\0s\x04\0\x06rende\
-r\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0chandle-input\x01\x02\x01@\0\0s\x04\
-\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:facet/contract\x05\x0d\x04\0\x1crash\
-omon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bfacet-world\x03\0\0\0G\x09produc\
-ers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060\
-.41.0";
+\x02\x03cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x01@\0\0s\x04\0\x0ddefault-shell\x01\
+\x07\x03\0\x18rashomon:process/spawner\x05\x08\x01B,\x04\0\x0fbrowser-context\x03\
+\x01\x01r\x03\x02ids\x04names\x0esource-browsers\x04\0\x13extension-candidate\x03\
+\0\x01\x01r\x03\x02ids\x04names\x0apopup-open\x7f\x04\0\x0eextension-info\x03\0\x03\
+\x01r\x03\x02ids\x03urls\x05titles\x04\0\x08tab-info\x03\0\x05\x04\0\x0bbrowser-\
+tab\x03\x01\x01h\0\x01@\x01\x04self\x08\0s\x04\0\x1a[method]browser-context.id\x01\
+\x09\x01p\x04\x01@\x01\x04self\x08\0\x0a\x04\0'[method]browser-context.list-exte\
+nsions\x01\x0b\x01j\0\x01s\x01@\x02\x04self\x08\x0cextension-ids\0\x0c\x04\0.[me\
+thod]browser-context.toggle-extension-popup\x01\x0d\x01p\x02\x01@\x01\x04self\x08\
+\0\x0e\x04\01[method]browser-context.list-extension-candidates\x01\x0f\x01@\x02\x04\
+self\x08\x0ccandidate-ids\0\x0c\x04\0%[method]browser-context.add-extension\x01\x10\
+\x04\0([method]browser-context.remove-extension\x01\x0d\x01p\x06\x01@\x01\x04sel\
+f\x08\0\x11\x04\0![method]browser-context.list-tabs\x01\x12\x01@\x02\x04self\x08\
+\x06tab-ids\0\x0c\x04\0%[method]browser-context.switch-to-tab\x01\x13\x01h\x07\x01\
+@\x01\x04self\x14\0s\x04\0\x16[method]browser-tab.id\x01\x15\x01@\x02\x04self\x14\
+\x03urls\0\x0c\x04\0\x1c[method]browser-tab.navigate\x01\x16\x04\0\x1f[method]br\
+owser-tab.current-url\x01\x15\x04\0\x19[method]browser-tab.title\x01\x15\x01@\x01\
+\x04self\x14\x01\0\x04\0\x19[method]browser-tab.close\x01\x17\x01j\x01s\x01s\x01\
+@\x01\x04self\x14\0\x18\x04\0\x20[method]browser-tab.snapshot-dom\x01\x19\x01@\x02\
+\x04self\x14\x06scripts\0\x18\x04\0![method]browser-tab.inject-script\x01\x1a\x01\
+@\x02\x04self\x14\x04specs\0\x18\x04\0\x1a[method]browser-tab.anchor\x01\x1b\x03\
+\0\x16rashomon:browser/types\x05\x09\x02\x03\0\x04\x0fbrowser-context\x02\x03\0\x04\
+\x0bbrowser-tab\x01B\x0b\x02\x03\x02\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\
+\x03\x02\x01\x0b\x04\0\x0bbrowser-tab\x03\0\x02\x01i\x01\x01@\0\0\x04\x04\0\x0ec\
+reate-context\x01\x05\x01h\x01\x01i\x03\x01@\x02\x07context\x06\x03urls\0\x07\x04\
+\0\x0acreate-tab\x01\x08\x03\0\x18rashomon:browser/control\x05\x0c\x01B\x07\x01@\
+\x01\x07node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0c\
+handle-input\x01\x02\x01@\0\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:fa\
+cet/contract\x05\x0d\x04\0\x1crashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0b\
+facet-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x07\
+0.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

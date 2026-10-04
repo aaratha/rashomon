@@ -44,14 +44,37 @@ cef = { version = "154.0.0", default-features = false, features = ["build-util",
 directories = "6.0.0"
 portable-pty = "0.9.0"
 
+# `winit` owns the one native window every tab (CEF browser, Facet
+# View, or the sidebar/urlbar) mounts into or attaches to as a child —
+# see the module doc comment on `run_browser_process`/`mac.rs` for why
+# this replaced CEF's own Views framework for windowing. Needed
+# cross-platform (not just macOS) since it's what calls
+# `WindowInfo::set_as_child`'s native parent handle comes from on every
+# platform, even though the translucent-webview pieces built on top of
+# it are mac-only for now (see the macOS-only deps below).
+winit = "0.30"
+raw-window-handle = "0.6"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSApplication",
+    "NSColor",
     "NSEvent",
     "NSResponder",
     "NSUserInterfaceValidation",
     "NSView",
     "NSWindow",
 ] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = [] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSNotification", "NSString"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+
+# Hosts the sidebar/urlbar/non-browser-Facet UI as transparent native
+# webviews (WKWebView on macOS) embedded directly into the one native
+# `winit` window — see `mac::NativeWindowHandle` and `FacetWebView`.
+# Real browser tabs stay on a real CEF `Browser`, which (per upstream
+# CEF issue #4035) can't be made transparent at all; `wry` doesn't go
+# through CEF for its rendering, so that restriction doesn't apply to
+# it. Linux/Windows support is deferred — this is scoped to macOS for
+# now, same as the background blur it's paired with.
+wry = { version = "0.57.0", default-features = false, features = ["os-webview"] }

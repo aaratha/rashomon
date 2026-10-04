@@ -13,35 +13,35 @@
 //! [`Kernel::open_view`] can instantiate any registered Facet against
 //! any Entity and mount it as a tab in the one shared switcher window
 //! every View and every `rashomon:browser` tab lives in (see
-//! [`open_browser_switcher_window`]/[`BrowserSwitcherState`]), all
-//! sharing one `Client`/`InputQueryHandler`/`Store` via [`InputBridge`].
+//! [`BrowserSwitcherState`]), all sharing one
+//! `Client`/`InputQueryHandler`/`Store` via [`InputBridge`].
 //!
-//! **Why one window, with real native panes, not an iframe-pane HTML
-//! shell:** the first attempt loaded a single shell page and inserted
-//! each View as an `<iframe srcdoc>` pane via `execute_java_script`.
-//! Two separate bugs showed up chasing that down, both confirmed
-//! empirically rather than assumed: (1) `execute_java_script` silently
-//! does nothing when called from a CEF `Task` (e.g. one scheduled via
-//! `post_delayed_task`) — identical script, called from a genuine
-//! Client/Handler callback like `on_load_end`, ran and logged; called
-//! from `Task::execute()`, returned normally but never actually ran.
-//! That one's dodged below by routing output through the same
-//! `cefQuery` round trip input already uses ([`POLL_REQUEST`]) instead
-//! of a host-side push loop. (2) More fundamentally, dynamically-created
-//! `<iframe srcdoc>` elements never finished navigating in this
-//! CEF/Alloy configuration at all. Real multi-pane support turned out to
-//! belong to native child-view embedding instead of HTML iframes — each
-//! View/tab is a real Views-framework `BrowserView` (see `create_tab`,
-//! `Kernel::open_window`), mounted into one shared, swappable panel
-//! (`BrowserSwitcherState::active_region`) exactly the way
-//! `crates/cef-extension-spike` validated it, rather than embedded via
-//! HTML at all.
+//! **Windowing: `winit` owns the one native window, CEF and `wry` are
+//! both just children of it.** CEF's own Views framework (`BrowserView`
+//! in one shared `Panel`) was the original design and worked, but CEF's
+//! `BrowserView` can never be made transparent in windowed mode
+//! (upstream issue chromiumembedded/cef#4035, confirmed unfixed) — a
+//! hard blocker once the UI grew a translucent sidebar. Validated in
+//! `crates/cef-winit-spike` and adopted here: `winit` creates and owns
+//! the single top-level window; real browser tabs embed as classic
+//! (non-Views) CEF child browsers via `WindowInfo::set_as_child`,
+//! staying fully opaque (expected, for a real web page); the sidebar,
+//! the urlbar, and every non-browser Facet View tab instead mount as
+//! transparent `wry` (WKWebView) child webviews over a real background
+//! blur (`mac::apply_background_blur`, a private CoreGraphics Services
+//! call — see that function's doc comment), so the glass layer behind
+//! them actually shows through. CEF is driven via its documented
+//! `external_message_pump` integration mode (see
+//! `WinitKernelApp::about_to_wait`) rather than owning its own blocking
+//! run loop, since `winit`'s is the one that's actually blocking here.
 //!
-//! Input flows back via a CEF message-router bridge: each tab's page
-//! prefixes its `window.cefQuery` calls with its own window id, so one
-//! shared [`InputQueryHandler`] can route a keystroke (or a
-//! [`POLL_REQUEST`]) to the right View's `handle-input` (or
-//! `poll-output`) rather than there being one handler per tab. More
+//! Input flows back via a CEF message-router bridge for real browser
+//! tabs, and `wry`'s own IPC transport (behind a `window.cefQuery`
+//! polyfill — see `mac::FacetWebView`) for everything else: each tab's
+//! page prefixes its request with its own window id, so one shared
+//! [`InputQueryHandler`]/[`dispatch_facet_request`] can route a
+//! keystroke (or a [`POLL_REQUEST`]) to the right View's `handle-input`
+//! (or `poll-output`) rather than there being one handler per tab. More
 //! than one tab can mirror the same View this way — see
 //! [`Kernel::open_window`] — with output fanned out so no mirroring tab
 //! loses it to whichever one happens to poll first. Every
@@ -49,9 +49,7 @@
 //! implementation — `rashomon:graph` by a `PersistentGraphStore` (so
 //! the graph survives a restart), and `rashomon:process` by a real PTY
 //! (`portable-pty`), not plain OS pipes — `resize`/`signal` are genuine
-//! now. Windowing is CEF (validated in `crates/cef-spike`), not
-//! `winit`/`softbuffer` — CEF owns the main run loop, so the two can't
-//! coexist in one process anyway.
+//! now.
 //!
 //! This is a library, not just `main.rs`, because CEF subprocesses
 //! (renderer/GPU/utility) on macOS run through the *separate*
@@ -73,11 +71,18 @@ use cef::wrapper::message_router::*;
 use cef::*;
 use directories::ProjectDirs;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use rashomon_graph::GraphStore;
 use serde::{Deserialize, Serialize};
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
+use winit::window::{Window, WindowId};
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -110,10 +115,9 @@ struct KernelState {
     /// in another browser, not yet added to `extensions`'s backing
     /// config file. See [`discover_extension_candidates`].
     extension_candidates: Arc<Vec<ExtensionCandidate>>,
-    /// `None` until [`open_browser_switcher_window`] builds the one
-    /// native window every tab gets mounted into — `create_tab` must
-    /// never be called before that happens (see
-    /// `KernelBrowserProcessHandler::on_context_initialized`).
+    /// `None` until [`WinitKernelApp::resumed`] builds the one native
+    /// window every tab gets mounted into — `create_tab` must never be
+    /// called before that happens.
     browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
 }
 
@@ -286,6 +290,14 @@ impl rashomon::process::spawner::Host for KernelState {
 
         let mut builder = CommandBuilder::new(&command);
         builder.args(&args);
+        // Overrides whatever `TERM` this GUI process itself inherited
+        // (often entirely unset, or `dumb`, when launched outside a
+        // real terminal — confirmed empirically: shells/prompts like
+        // `starship` explicitly detect and disable themselves under
+        // it) with the one every spawned shell is actually running
+        // inside here: `terminal-xterm`'s `xterm.js` frontend, which
+        // emulates a real `xterm-256color`-class terminal.
+        builder.env("TERM", "xterm-256color");
         if let Some(cwd) = &cwd {
             builder.cwd(cwd);
         }
@@ -328,6 +340,16 @@ impl rashomon::process::spawner::Host for KernelState {
                 incoming,
             })
             .map_err(|e| format!("failed to register spawned process: {e}"))
+    }
+
+    /// `CommandBuilder::new_default_prog().get_shell()` is `portable_pty`'s
+    /// own cross-platform shell-resolution logic (Unix: `$SHELL`, falling
+    /// back to the password database — i.e. whatever `chsh` set; Windows:
+    /// its own default-shell lookup) — reused here rather than
+    /// reimplemented, so a guest asking for "the default shell" gets
+    /// exactly what a real terminal emulator would give it.
+    fn default_shell(&mut self) -> String {
+        CommandBuilder::new_default_prog().get_shell()
     }
 }
 
@@ -618,12 +640,9 @@ wrap_client! {
     }
 }
 
-/// Shared by `HostBrowserContext::toggle_extension_popup` (the WIT-facing
-/// path, called from a Facet Component) and `SwitcherOpenPopupButtonDelegate`
-/// (the native "Open Popup" button on the browser switcher window built
-/// by [`open_browser_switcher_window`]) — both reproduce the exact
-/// open/close-race-safe toggle `cef-extension-spike` validated, via this
-/// one function, rather than two parallel copies of the same logic.
+/// The WIT-facing path for `HostBrowserContext::toggle_extension_popup`
+/// (called from a Facet Component) — reproduces the exact
+/// open/close-race-safe toggle `cef-extension-spike` validated.
 fn toggle_extension_popup_impl(ext: &ExtensionRuntime) -> Result<(), String> {
     let mut state = ext.popup.lock().expect("popup lock poisoned");
     match &*state {
@@ -671,116 +690,250 @@ pub struct BrowserContext {
     id: String,
 }
 
-/// A real `RuntimeStyle::ALLOY` `BrowserView` — never in its own
-/// dedicated window. `create_tab` mounts every tab's `BrowserView` into
-/// the one shared, swappable active-region panel
-/// [`open_browser_switcher_window`] builds (Alloy-style BrowserViews,
-/// unlike Chrome-style ones, have no "only one per window" restriction
-/// — confirmed in `cef-extension-spike`), the same one-window design
-/// that spike's tab-switching + popup-toggle behavior validated.
+/// A real classic (non-Views) CEF `Browser`, embedded as a child of the
+/// one native `winit` window via `WindowInfo::set_as_child` — never in
+/// its own dedicated top-level window. `create_tab` mounts every tab
+/// into the shared switcher's tab list (see [`BrowserSwitcherState`]),
+/// the same one-window design `cef-extension-spike`/`cef-winit-spike`
+/// validated.
 pub struct BrowserTab {
     id: String,
-    browser_view: BrowserView,
+    browser: Browser,
     title: Arc<Mutex<String>>,
 }
 
-/// One tab mounted or mountable into [`BrowserSwitcherState::active_region`]
-/// — a cheap `BrowserView` clone (Views-framework handles are cheap to
-/// duplicate; CEF's own `BrowserHost`/`Browser` stays singular either
-/// way). This doesn't fight the WIT `browser-tab` resource's single-owner
-/// rule since it's pure host-side bookkeeping, entirely independent of
-/// whichever Facet Component's [`BrowserTab`] handle `create-tab` also
-/// returned for the same underlying browser.
-/// `root_panel`/`root_layout` are here (not just `active_region`) so
-/// the sidebar — now a real Facet View, not inline host code, see
-/// [`Kernel::open_sidebar_view`] — can be mounted into the same
-/// horizontal split *after* [`open_browser_switcher_window`] returns,
-/// once the "sidebar" Facet has actually been instantiated and
-/// rendered.
 /// Whether a switcher tab is a real website (`create_tab`, where an
 /// address bar makes sense) or a Facet View (`Kernel::open_window` —
 /// terminal/graph-view/extensions, where it doesn't: there's no URL a
-/// user should be navigating, just `data:` HTML the host generated).
+/// user should be navigating, just `data:` HTML the host generated —
+/// and where, on macOS, the tab is `wry`-hosted instead of CEF-hosted
+/// so it can render transparently over the window's background blur;
+/// see [`TabWidget`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TabKind {
     Browser,
     FacetView,
 }
 
-struct BrowserSwitcherState {
-    root_panel: Panel,
-    root_layout: Option<BoxLayout>,
-    /// The sidebar's sibling in `root_panel`'s horizontal split — holds
-    /// `urlbar`/`active_region` stacked vertically, so the sidebar-vs-
-    /// content flex logic in [`Kernel::open_sidebar_view`] only has to
-    /// reason about one opaque right-hand-side child, not know this
-    /// vertical split exists at all.
-    content_panel: Panel,
-    /// Address bar for whichever tab is currently active — a native
-    /// `Textfield`, not a Facet (unlike the sidebar), since this is
-    /// host browser-chrome rather than user-authorable UI, and because
-    /// native Views widgets (unlike `BrowserView`) correctly honor a
-    /// `flex: 0` preferred-size row in `content_panel`'s `BoxLayout`.
-    urlbar: Textfield,
-    active_region: Panel,
-    /// `(tab-id, view, title)` — `tab-id` is whatever `create_tab`/
-    /// `open_window` already generates (a `BrowserTab`'s own id, or a
-    /// Facet View's window id), exposed to guests via
-    /// `list-tabs`/`switch-to-tab` so a sidebar Facet can address a tab
-    /// without ever holding (or being handed) its `browser-tab`
-    /// resource. `title` is the same `Arc<Mutex<String>>` a
-    /// `DisplayHandler` (`TabDisplayHandler`, shared by `TabClient` and
-    /// `ViewClient`) keeps live-updated from the page's real
-    /// `document.title` — so a browser tab's entry here and the
-    /// `BrowserTab` resource `create_tab` hands back track the exact
-    /// same title, not two independently-drifting copies.
-    tabs: Vec<(String, BrowserView, Arc<Mutex<String>>, TabKind)>,
-    active_index: usize,
+/// The actual native widget backing one switcher tab — a real CEF
+/// `Browser` (classic-embedded, always opaque — correct for both real
+/// websites and, on non-macOS, Facet Views too, since `wry`/the
+/// background blur are macOS-only for now), or, on macOS, a
+/// transparent `wry` webview for Facet Views/the sidebar.
+enum TabWidget {
+    Browser(Browser),
+    #[cfg(target_os = "macos")]
+    Facet(mac::FacetWebView),
 }
+
+/// One switcher tab's full bookkeeping: its id, whether it's a real
+/// website or a Facet View (decides urlbar visibility), the live
+/// `document.title` tracker (`TabDisplayHandler`/`wry`'s
+/// `document_title_changed_handler` both feed the same `Arc`), and the
+/// actual native widget.
+struct SwitcherTab {
+    id: String,
+    kind: TabKind,
+    title: Arc<Mutex<String>>,
+    widget: TabWidget,
+}
+
+/// All of this kernel's windowing state: the one `winit`-owned native
+/// window every tab (browser or Facet View) and the sidebar/urlbar
+/// attach to, plus the switcher's tab list. Replaces the CEF
+/// Views-framework design (`Panel`/`BoxLayout`/`BrowserView`) validated
+/// in `crates/cef-extension-spike` — see the module doc comment for
+/// why: CEF's `BrowserView` can never be transparent, which a
+/// translucent sidebar needs. `crates/cef-winit-spike` validated the
+/// replacement this now ports: `winit` owns the window, CEF embeds
+/// classic (non-Views) child browsers into it, `wry` hosts everything
+/// that needs to be transparent.
+struct BrowserSwitcherState {
+    /// The raw native parent handle `wry::WebViewBuilder::build_as_child`
+    /// wants — only meaningful on macOS, where `wry` is wired up at all
+    /// (see `mac::FacetWebView`/`mac::UrlBarWebView`).
+    #[cfg(target_os = "macos")]
+    native_window_handle: mac::NativeWindowHandle,
+    /// The same native window, reinterpreted as the `cef_window_handle_t`
+    /// CEF's `WindowInfo::set_as_child` wants — needed on every
+    /// platform, since real browser tabs are always CEF-embedded.
+    native_parent: cef::sys::cef_window_handle_t,
+    /// Host browser-chrome, not a Facet — see [`mac::UrlBarWebView`]'s
+    /// doc comment. `None` on non-macOS, where this integration isn't
+    /// wired up yet.
+    #[cfg(target_os = "macos")]
+    urlbar: mac::UrlBarWebView,
+    /// Exposed to guests via `list-tabs`/`switch-to-tab` so a sidebar
+    /// Facet can address a tab without ever holding (or being handed)
+    /// its `browser-tab` resource.
+    tabs: Vec<SwitcherTab>,
+    active_index: usize,
+    /// The sidebar's actual content, once [`Kernel::open_sidebar_view`]
+    /// creates it — `None` until then. Kept here (not just a local in
+    /// that function) so it isn't dropped/torn down immediately after
+    /// creation. A [`TabWidget::Facet`] (transparent `wry`) on macOS,
+    /// a [`TabWidget::Browser`] (opaque, classic-embedded CEF) on every
+    /// other platform, where `wry`/the background blur aren't wired up
+    /// yet — see the module doc comment's "macOS-only for now" scoping.
+    sidebar_widget: Option<TabWidget>,
+}
+
+// `native_parent` is a raw `cef_window_handle_t` (`*mut c_void` on
+// macOS) — no automatic `Send`/`Sync`, asserted manually here under
+// the same invariant `mac::NativeWindowHandle` already relies on:
+// everything touching it stays on CEF/winit's one UI thread,
+// synchronized through `Arc<Mutex<_>>` at this very type. Required for
+// `KernelState`/`InputBridge` to satisfy `wasmtime_wasi::WasiView:
+// Send` and `cef::wrapper::message_router::BrowserSideHandler: Send +
+// Sync`.
+unsafe impl Send for BrowserSwitcherState {}
+unsafe impl Sync for BrowserSwitcherState {}
 
 impl BrowserSwitcherState {
     fn switch_to(&mut self, index: usize) {
-        if index == self.active_index || index >= self.tabs.len() {
+        if index >= self.tabs.len() {
             return;
         }
-        // Toggles visibility rather than adding/removing children —
-        // every tab's `BrowserView` is already mounted (see
-        // `mount_tab_in_switcher`'s doc comment for why: an unmounted
-        // `BrowserView` never actually starts its renderer, so title
-        // tracking never fires for a tab the user hasn't switched to
-        // at least once).
-        View::from(&self.tabs[self.active_index].1).set_visible(0);
-        View::from(&self.tabs[index].1).set_visible(1);
-        self.active_region.layout();
-        self.active_index = index;
-        self.sync_urlbar();
+        if index != self.active_index {
+            if let Some(prev) = self.tabs.get(self.active_index) {
+                hide_widget(&prev.widget);
+            }
+            self.active_index = index;
+        }
+        self.layout_active();
     }
 
     fn switch_to_id(&mut self, tab_id: &str) -> Result<(), String> {
         let index = self
             .tabs
             .iter()
-            .position(|(id, _, _, _)| id == tab_id)
+            .position(|tab| tab.id == tab_id)
             .ok_or_else(|| format!("no such tab: {tab_id}"))?;
         self.switch_to(index);
         Ok(())
     }
 
-    /// Shows the address bar (with the active tab's current URL) only
-    /// for `TabKind::Browser` tabs, hiding it entirely for Facet
-    /// Views — called whenever the active tab changes, and once right
-    /// after the very first tab mounts.
-    fn sync_urlbar(&self) {
-        let Some((_, view, _, kind)) = self.tabs.get(self.active_index) else { return };
-        let urlbar_view = View::from(&self.urlbar);
-        match kind {
-            TabKind::Browser => {
-                urlbar_view.set_visible(1);
-                self.urlbar.set_text(Some(&CefString::from(browser_view_url(view).as_str())));
+    /// Positions/shows the currently active tab's widget at the
+    /// content rect appropriate for its kind (leaving room for the
+    /// urlbar above it iff it's a `TabKind::Browser` tab), and syncs
+    /// the urlbar's own visibility/text to match. Called whenever the
+    /// active tab changes, and once right after the very first tab
+    /// mounts.
+    fn layout_active(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_index) else { return };
+        let show_urlbar = tab.kind == TabKind::Browser;
+        let rect = if show_urlbar { content_rect_below_urlbar() } else { content_rect_full() };
+        show_widget_at(&tab.widget, rect);
+
+        #[cfg(target_os = "macos")]
+        {
+            self.urlbar.set_visible(show_urlbar);
+            if show_urlbar {
+                if let TabWidget::Browser(browser) = &tab.widget {
+                    self.urlbar.set_text(&browser_url(browser));
+                }
             }
-            TabKind::FacetView => urlbar_view.set_visible(0),
         }
-        self.content_panel.layout();
+    }
+
+    /// Navigates whichever tab is currently active — only meaningful
+    /// for `TabKind::Browser` tabs (a `TabWidget::Facet` has no
+    /// navigable `Browser` at all); silently a no-op otherwise, same
+    /// as the urlbar being hidden for those tabs in the first place.
+    fn navigate_active(&self, url: &str) {
+        let Some(tab) = self.tabs.get(self.active_index) else { return };
+        if let TabWidget::Browser(browser) = &tab.widget {
+            if let Some(frame) = browser.main_frame() {
+                frame.load_url(Some(&CefString::from(url)));
+            }
+        }
+    }
+}
+
+/// Hides a tab's native widget without destroying it — used when
+/// switching away from it, so it keeps running (a terminal session's
+/// PTY, a page's JS timers) rather than being torn down and recreated
+/// on every switch.
+fn hide_widget(widget: &TabWidget) {
+    match widget {
+        TabWidget::Browser(browser) => {
+            #[cfg(target_os = "macos")]
+            if let Some(host) = browser.host() {
+                let handle = host.window_handle();
+                if !handle.is_null() {
+                    mac::set_view_hidden(handle as *mut std::ffi::c_void, true);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Hiding a classic-embedded CEF child browser's native
+                // view needs a platform call (Win32/Xlib) this hasn't
+                // been ported to yet — see the module doc comment's
+                // "macOS-only for now" scoping. Tabs stay stacked/all
+                // visible on non-macOS until this is ported.
+                let _ = browser;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        TabWidget::Facet(webview) => webview.set_visible(false),
+    }
+}
+
+/// Resizes, repositions, and shows a tab's native widget — used both
+/// for the first time a tab mounts and every time it becomes active
+/// again after being hidden.
+fn show_widget_at(widget: &TabWidget, rect: Rect) {
+    match widget {
+        TabWidget::Browser(browser) => {
+            #[cfg(target_os = "macos")]
+            if let Some(host) = browser.host() {
+                let handle = host.window_handle();
+                if !handle.is_null() {
+                    mac::set_view_frame(handle as *mut std::ffi::c_void, rect);
+                    mac::set_view_hidden(handle as *mut std::ffi::c_void, false);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (browser, rect);
+        }
+        #[cfg(target_os = "macos")]
+        TabWidget::Facet(webview) => {
+            webview.set_bounds(cef_rect_to_wry(rect));
+            webview.set_visible(true);
+        }
+    }
+}
+
+/// Registers a tab in the shared switcher under `tab_id`, making it
+/// the active (visible) one immediately if it's the very first tab
+/// ever created, otherwise mounting it hidden — only one tab is ever
+/// visible at a time, toggled by [`BrowserSwitcherState::switch_to`].
+/// The sidebar Facet discovers new tabs itself by polling `list-tabs`,
+/// rather than being told about each one as it's created. Shared by
+/// `create_tab` (the `rashomon:browser` Host) and `Kernel::open_window`
+/// (Facet Views) — both just hand this whichever [`TabWidget`] they
+/// created, so a terminal session and a browser tab become
+/// indistinguishable switcher entries, titles included.
+fn mount_tab(
+    tab_id: String,
+    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
+    widget: TabWidget,
+    title: Arc<Mutex<String>>,
+    kind: TabKind,
+) {
+    let mut guard = browser_switcher.lock().expect("browser switcher lock poisoned");
+    let Some(switcher) = guard.as_mut() else {
+        eprintln!("mount-tab: no browser switcher window yet — tab created but not mounted anywhere");
+        return;
+    };
+
+    let index = switcher.tabs.len();
+    switcher.tabs.push(SwitcherTab { id: tab_id, kind, title, widget });
+    if index == 0 {
+        switcher.active_index = 0;
+        switcher.layout_active();
+    } else {
+        hide_widget(&switcher.tabs[index].widget);
     }
 }
 
@@ -802,57 +955,12 @@ wrap_task! {
     }
 }
 
-/// Registers `browser_view` as a new tab in the shared switcher under
-/// `tab_id`, mounting it into the active region immediately — every
-/// tab, not just the first, is added as a child right away (hidden via
-/// `set_visible(0)` unless it's the very first tab); only one is ever
-/// visible at a time, toggled by [`BrowserSwitcherState::switch_to`]
-/// rather than by adding/removing children. A `BrowserView` that's
-/// never been attached to a shown widget hierarchy never actually
-/// starts its renderer — confirmed by observing that a tab's title
-/// (and any navigation it does) only ever updates once the user has
-/// switched to it at least once; mounting-but-hiding fixes that while
-/// still only ever painting the one tab that's actually visible. The
-/// sidebar Facet discovers new tabs itself by polling `list-tabs`,
-/// rather than being told about each one as it's created. Shared by
-/// `create_tab` (the `rashomon:browser` Host) and `Kernel::open_window`
-/// (Facet Views) — both just hand this whichever `BrowserView` they
-/// created (plus the title `Arc` their own `Client`'s `DisplayHandler`
-/// keeps updated), so a terminal session and a browser tab become
-/// indistinguishable sidebar entries, titles included.
-fn mount_tab_in_switcher(
-    tab_id: String,
-    browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
-    browser_view: BrowserView,
-    title: Arc<Mutex<String>>,
-    kind: TabKind,
-) {
-    let mut guard = browser_switcher.lock().expect("browser switcher lock poisoned");
-    let Some(switcher) = guard.as_mut() else {
-        eprintln!("mount-tab: no browser switcher window yet — tab created but not mounted anywhere");
-        return;
-    };
-
-    let index = switcher.tabs.len();
-    switcher.tabs.push((tab_id, browser_view.clone(), title, kind));
-
-    let mut view = View::from(&browser_view);
-    switcher.active_region.add_child_view(Some(&mut view));
-    if index == 0 {
-        switcher.active_index = 0;
-        switcher.sync_urlbar();
-    } else {
-        view.set_visible(0);
-    }
-    switcher.active_region.layout();
-}
-
-/// Shared by `BrowserSwitcherState::switch_to`, `mount_tab_in_switcher`,
-/// and `HostBrowserContext::list_tabs` — the one place that knows how
-/// to pull a live URL back out of a `BrowserView`.
-fn browser_view_url(view: &BrowserView) -> String {
-    view.browser()
-        .and_then(|b| b.main_frame())
+/// Shared by `BrowserSwitcherState::layout_active`/`navigate_active`
+/// and `HostBrowserContext::list_tabs`/`HostBrowserTab` — the one
+/// place that knows how to pull a live URL back out of a `Browser`.
+fn browser_url(browser: &Browser) -> String {
+    browser
+        .main_frame()
         .map(|f| CefString::from(&f.url()).to_string())
         .unwrap_or_default()
 }
@@ -896,142 +1004,38 @@ fn looks_like_url(input: &str) -> bool {
     host_part.contains('.') && !host_part.starts_with('.') && !host_part.ends_with('.')
 }
 
-/// Out of 100 total — the sidebar gets `SIDEBAR_FLEX`% of the window's
-/// width, content gets the rest. A *weighted* split like this doesn't
-/// depend on either child's preferred size at all (`BoxLayout` only
-/// consults preferred size for `flex: 0` items — distributing space by
-/// weight among `flex > 0` items sidesteps that entirely), which
-/// matters here because `BrowserView::GetPreferredSize()` doesn't
-/// appear to honor its delegate's override the way a plain `Panel`
-/// does. Confirmed empirically across two failed attempts: a `flex: 0`
-/// sidebar collapsed to zero width; giving the window no layout
-/// manager at all and setting bounds manually didn't stick either —
-/// CEF re-runs some layout pass on its own (e.g. when the window
-/// regains focus), clobbering manually-set bounds. A weighted split is
-/// proportional rather than a fixed pixel width, but correct
-/// regardless of window size, and doesn't fight CEF's own relayout.
-const SIDEBAR_FLEX: i32 = 22;
-const CONTENT_FLEX: i32 = 100 - SIDEBAR_FLEX;
-
-/// Matches `TabWindowDelegate::preferred_size`'s 1024px window width —
-/// only used for the draggable-region strip below, so it doesn't need
-/// to track `SIDEBAR_FLEX` exactly (a slightly-off drag strip is a
-/// cosmetic nit, not a correctness bug, unlike the sizing fiasco above).
+/// The one native window's fixed size — no live resize handling yet
+/// (see `WinitKernelApp::resumed`'s `with_resizable(false)`), so every
+/// rect below is computed from these constants rather than tracked
+/// against the window's actual current size.
+const WINDOW_WIDTH_PX: i32 = 1280;
+const WINDOW_HEIGHT_PX: i32 = 800;
+/// Width of the sidebar region on the left — the rest of the window is
+/// the content region every switcher tab mounts into.
 const SIDEBAR_WIDTH_PX: i32 = 225;
-/// Standard macOS traffic-light button height.
-const TITLEBAR_STRIP_HEIGHT: i32 = 28;
+/// Height of the urlbar strip, reserved at the top of the content
+/// region only while a `TabKind::Browser` tab is active.
+const URLBAR_HEIGHT_PX: i32 = 36;
 
-/// Builds the one native window every tab (browser or Facet View) gets
-/// mounted into and switched between — a direct port of
-/// `cef-extension-spike`'s validated one-window, shared-active-region
-/// design. The sidebar itself is *not* built here — it's a real Facet
-/// Component (`components/sidebar`), mounted afterward via
-/// [`Kernel::open_sidebar_view`] once that Facet has actually been
-/// instantiated and rendered (see
-/// `KernelBrowserProcessHandler::on_context_initialized`), so it's as
-/// freely modifiable as any other Facet's HTML without touching this
-/// native layer at all. This function only needs to reserve the
-/// active-region side of the split and leave room (in the box layout's
-/// child order — `root_panel.add_child_view_at(.., 0)`, see
-/// `open_sidebar_view`) for the sidebar to slot in on the left.
-fn open_browser_switcher_window(browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>) {
-    let mut window_delegate = TabWindowDelegate::new();
-    let Some(window) = window_create_top_level(Some(&mut window_delegate)) else {
-        eprintln!("browser switcher: window_create_top_level returned None");
-        return;
-    };
-    // The window's own direct child is a single root Panel (via
-    // `FillLayout`, not `BoxLayout`) — two failed attempts (logged via
-    // temporary bounds diagnostics) showed the *window's own*
-    // `BoxLayout`, when a `BrowserView` is one of its direct children,
-    // always gives that `BrowserView` the entire window regardless of
-    // flex settings (bounds were logged as sidebar = full window,
-    // active_region = zero, even immediately after an explicit
-    // relayout). Nesting the real horizontal split one level deeper,
-    // inside a plain `Panel` that is itself the *only* thing the
-    // window manages, avoids whatever special-cased behavior the
-    // window's root view has for a direct `BrowserView` child.
-    window.set_to_fill_layout();
+fn sidebar_rect() -> Rect {
+    Rect { x: 0, y: 0, width: SIDEBAR_WIDTH_PX, height: WINDOW_HEIGHT_PX }
+}
 
-    let root_panel = panel_create(None).expect("panel_create failed");
-    let root_layout = root_panel.set_to_box_layout(Some(&BoxLayoutSettings {
-        horizontal: 1,
-        // Default cross_axis_alignment is START, which sizes each
-        // child to its own preferred size on the cross axis (height)
-        // rather than filling the window — without this, the sidebar
-        // and active-region panel (and its BrowserViews) collapse to
-        // zero height. See `cef-extension-spike`'s identical fix.
-        cross_axis_alignment: AxisAlignment::STRETCH,
-        ..Default::default()
-    }));
+fn urlbar_rect() -> Rect {
+    Rect { x: SIDEBAR_WIDTH_PX, y: 0, width: WINDOW_WIDTH_PX - SIDEBAR_WIDTH_PX, height: URLBAR_HEIGHT_PX }
+}
 
-    // `content_panel` stacks the address bar above `active_region` —
-    // kept as one opaque child of `root_panel` so the sidebar-vs-
-    // content flex swap in `Kernel::open_sidebar_view` doesn't need to
-    // know this vertical split exists at all.
-    let content_panel = panel_create(None).expect("panel_create failed");
-    let content_layout = content_panel.set_to_box_layout(Some(&BoxLayoutSettings {
-        horizontal: 0,
-        cross_axis_alignment: AxisAlignment::STRETCH,
-        ..Default::default()
-    }));
+fn content_rect_full() -> Rect {
+    Rect { x: SIDEBAR_WIDTH_PX, y: 0, width: WINDOW_WIDTH_PX - SIDEBAR_WIDTH_PX, height: WINDOW_HEIGHT_PX }
+}
 
-    let mut urlbar_delegate = UrlBarDelegate::new(browser_switcher.clone());
-    let urlbar = textfield_create(Some(&mut urlbar_delegate)).expect("textfield_create failed");
-    urlbar.set_placeholder_text(Some(&CefString::from("Enter a URL")));
-    // Hidden until the first tab mounts and `sync_urlbar` decides
-    // whether it's a `Browser` tab worth showing this for — avoids a
-    // brief flash of an empty address bar before that happens.
-    View::from(&urlbar).set_visible(0);
-
-    let active_region = panel_create(None).expect("panel_create failed");
-    active_region.set_to_fill_layout();
-
-    let mut urlbar_view = View::from(&urlbar);
-    content_panel.add_child_view(Some(&mut urlbar_view));
-    // No explicit flex for the urlbar row — unlike `BrowserView`
-    // (see `SIDEBAR_FLEX`'s doc comment), a plain `Textfield`'s
-    // preferred size *is* honored at `flex: 0`, so it sizes to its own
-    // natural single-line height instead of collapsing.
-    let mut active_region_view = View::from(&active_region);
-    content_panel.add_child_view(Some(&mut active_region_view));
-    if let Some(content_layout) = &content_layout {
-        content_layout.set_flex_for_view(Some(&mut active_region_view), 1);
+fn content_rect_below_urlbar() -> Rect {
+    Rect {
+        x: SIDEBAR_WIDTH_PX,
+        y: URLBAR_HEIGHT_PX,
+        width: WINDOW_WIDTH_PX - SIDEBAR_WIDTH_PX,
+        height: WINDOW_HEIGHT_PX - URLBAR_HEIGHT_PX,
     }
-    content_panel.layout();
-
-    let mut content_panel_view = View::from(&content_panel);
-    root_panel.add_child_view(Some(&mut content_panel_view));
-    if let Some(root_layout) = &root_layout {
-        root_layout.set_flex_for_view(Some(&mut content_panel_view), CONTENT_FLEX);
-    }
-    root_panel.layout();
-
-    *browser_switcher.lock().expect("browser switcher lock poisoned") = Some(BrowserSwitcherState {
-        root_panel: root_panel.clone(),
-        root_layout,
-        content_panel: content_panel.clone(),
-        urlbar,
-        active_region: active_region.clone(),
-        tabs: Vec::new(),
-        active_index: 0,
-    });
-
-    let mut root_panel_view = View::from(&root_panel);
-    window.add_child_view(Some(&mut root_panel_view));
-    window.layout();
-
-    // Frameless (see `TabWindowDelegate::is_frameless`) means the OS
-    // no longer has a titlebar to grab for moving the window — just
-    // the sidebar's own top strip is draggable, matching where the
-    // traffic-light buttons sit and leaving the rest of the sidebar
-    // (its buttons) and all tab content click-through, not drag-through.
-    window.set_draggable_regions(Some(&[DraggableRegion {
-        bounds: Rect { x: 0, y: 0, width: SIDEBAR_WIDTH_PX, height: TITLEBAR_STRIP_HEIGHT },
-        draggable: 1,
-    }]));
-
-    window.show();
 }
 
 wrap_display_handler! {
@@ -1055,95 +1059,6 @@ wrap_client! {
     impl Client {
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(TabDisplayHandler::new(self.title.clone()))
-        }
-    }
-}
-
-wrap_window_delegate! {
-    struct TabWindowDelegate {}
-
-    impl ViewDelegate {
-        fn preferred_size(&self, _view: Option<&mut View>) -> Size {
-            Size { width: 1024, height: 768 }
-        }
-    }
-    impl PanelDelegate {}
-    impl WindowDelegate {
-        fn can_close(&self, _window: Option<&mut Window>) -> i32 {
-            1
-        }
-
-        fn window_runtime_style(&self) -> RuntimeStyle {
-            RuntimeStyle::ALLOY
-        }
-
-        /// No native title bar — paired with `with_standard_window_buttons`
-        /// below (macOS-only) so the traffic-light close/minimize/zoom
-        /// buttons still render at the top-left, just without the bar
-        /// itself. `Window::set_draggable_regions` (see
-        /// `open_browser_switcher_window`) is what makes the window
-        /// still movable without a titlebar to grab.
-        fn is_frameless(&self, _window: Option<&mut Window>) -> i32 {
-            1
-        }
-
-        fn with_standard_window_buttons(&self, _window: Option<&mut Window>) -> i32 {
-            1
-        }
-    }
-}
-
-wrap_browser_view_delegate! {
-    struct TabBrowserViewDelegate {}
-
-    impl ViewDelegate {}
-    impl BrowserViewDelegate {
-        fn browser_runtime_style(&self) -> RuntimeStyle {
-            RuntimeStyle::ALLOY
-        }
-    }
-}
-
-// Native browser-chrome, not a Facet — unlike the sidebar, this isn't
-// something a user should need to author HTML to restyle; it's the
-// same host-level address bar every browser has. Fires on the UI
-// thread via a plain Views widget event, independent of the
-// `InputBridge`-mutex call stack `SwitchTabTask`/`post_task` was
-// needed for, so no deferral is needed here.
-wrap_textfield_delegate! {
-    struct UrlBarDelegate {
-        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
-    }
-
-    impl ViewDelegate {}
-    impl TextfieldDelegate {
-        fn on_key_event(&self, textfield: Option<&mut Textfield>, event: Option<&KeyEvent>) -> i32 {
-            let Some(event) = event else { return 0 };
-            // `windows_key_code` is CEF's cross-platform virtual-key
-            // code field (named for its origin, not Windows-only) —
-            // 13 is Enter/Return on every platform. Confirmed via
-            // logging that this platform's `Textfield` only ever
-            // delivers Enter as `RAWKEYDOWN`, never `KEYDOWN`/`CHAR` —
-            // matching both here rather than assuming `KEYDOWN`.
-            let is_enter = event.windows_key_code == 13
-                && (event.type_ == KeyEventType::KEYDOWN || event.type_ == KeyEventType::RAWKEYDOWN);
-            if !is_enter {
-                return 0;
-            }
-            let Some(textfield) = textfield else { return 0 };
-            let typed = CefString::from(&textfield.text()).to_string();
-            let url = normalize_url_input(&typed);
-            let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
-            if let Some(switcher) = guard.as_mut() {
-                if let Some((_, view, _, _)) = switcher.tabs.get(switcher.active_index) {
-                    if let Some(frame) = view.browser().and_then(|b| b.main_frame()) {
-                        frame.load_url(Some(&CefString::from(url.as_str())));
-                    }
-                }
-            }
-            drop(guard);
-            textfield.set_text(Some(&CefString::from(url.as_str())));
-            1
         }
     }
 }
@@ -1194,14 +1109,22 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
         switcher
             .tabs
             .iter()
-            .map(|(id, view, title, _kind)| {
-                let url = browser_view_url(view);
+            .map(|tab| {
+                // Only a `TabWidget::Browser` has a real navigable URL
+                // — a `TabWidget::Facet` (terminal/graph-view/
+                // extensions) doesn't, so it falls back to its tracked
+                // title alone.
+                let url = match &tab.widget {
+                    TabWidget::Browser(browser) => browser_url(browser),
+                    #[cfg(target_os = "macos")]
+                    TabWidget::Facet(_) => String::new(),
+                };
                 // The real tracked `document.title`, falling back to
                 // the url for the brief window before the page's own
                 // title has fired (or for a page that never sets one).
-                let tracked = title.lock().expect("title lock poisoned").clone();
+                let tracked = tab.title.lock().expect("title lock poisoned").clone();
                 let title = if tracked.is_empty() { url.clone() } else { tracked };
-                rashomon::browser::types::TabInfo { id: id.clone(), url, title }
+                rashomon::browser::types::TabInfo { id: tab.id.clone(), url, title }
             })
             .collect()
     }
@@ -1299,19 +1222,14 @@ impl rashomon::browser::types::HostBrowserTab for KernelState {
 
     fn navigate(&mut self, self_: Resource<BrowserTab>, url: String) -> Result<(), String> {
         let tab = self.table.get(&self_).map_err(|e| e.to_string())?;
-        let browser = tab.browser_view.browser().ok_or("browser not ready yet")?;
-        let frame = browser.main_frame().ok_or("tab has no main frame")?;
+        let frame = tab.browser.main_frame().ok_or("tab has no main frame")?;
         frame.load_url(Some(&CefString::from(url.as_str())));
         Ok(())
     }
 
     fn current_url(&mut self, self_: Resource<BrowserTab>) -> String {
         let Ok(tab) = self.table.get(&self_) else { return String::new() };
-        tab.browser_view
-            .browser()
-            .and_then(|b| b.main_frame())
-            .map(|f| CefString::from(&f.url()).to_string())
-            .unwrap_or_default()
+        browser_url(&tab.browser)
     }
 
     fn title(&mut self, self_: Resource<BrowserTab>) -> String {
@@ -1321,7 +1239,7 @@ impl rashomon::browser::types::HostBrowserTab for KernelState {
 
     fn close(&mut self, self_: Resource<BrowserTab>) {
         if let Ok(tab) = self.table.get(&self_) {
-            if let Some(host) = tab.browser_view.browser().and_then(|b| b.host()) {
+            if let Some(host) = tab.browser.host() {
                 host.close_browser(1);
             }
         }
@@ -1333,8 +1251,7 @@ impl rashomon::browser::types::HostBrowserTab for KernelState {
 
     fn inject_script(&mut self, self_: Resource<BrowserTab>, script: String) -> Result<String, String> {
         let tab = self.table.get(&self_).map_err(|e| e.to_string())?;
-        let browser = tab.browser_view.browser().ok_or("browser not ready yet")?;
-        let frame = browser.main_frame().ok_or("tab has no main frame")?;
+        let frame = tab.browser.main_frame().ok_or("tab has no main frame")?;
         frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
         // `execute_java_script` has no return value in CEF's own API —
         // getting the script's result back would need a round trip
@@ -1349,7 +1266,7 @@ impl rashomon::browser::types::HostBrowserTab for KernelState {
 
     fn drop(&mut self, self_: Resource<BrowserTab>) -> wasmtime::Result<()> {
         if let Ok(tab) = self.table.delete(self_) {
-            if let Some(host) = tab.browser_view.browser().and_then(|b| b.host()) {
+            if let Some(host) = tab.browser.host() {
                 host.close_browser(1);
             }
         }
@@ -1364,32 +1281,46 @@ impl rashomon::browser::control::Host for KernelState {
             .expect("resource table push failed")
     }
 
-    /// Mounts the new tab's `BrowserView` into the shared switcher
-    /// window's active-region panel (making it visible immediately if
+    /// Embeds the new tab as a classic (non-Views) CEF child browser
+    /// of the shared switcher window (making it visible immediately if
     /// it's the first tab ever created, exactly like
     /// `cef-extension-spike`'s `TabSwitcher` mounted its first tab at
     /// startup) rather than giving it a window of its own.
+    /// `browser_host_create_browser_sync` (not the async
+    /// `browser_host_create_browser`) is what makes a real `Browser`
+    /// available immediately — needed here since `create-tab` has to
+    /// hand one back as a WIT resource synchronously, with nowhere to
+    /// stash an async `on_after_created` callback's result in the
+    /// meantime.
     fn create_tab(&mut self, _context: Resource<BrowserContext>, url: String) -> Resource<BrowserTab> {
         let title = Arc::new(Mutex::new(String::new()));
         let mut client = TabClient::new(title.clone());
+        let native_parent = self
+            .browser_switcher
+            .lock()
+            .expect("browser switcher lock poisoned")
+            .as_ref()
+            .map(|s| s.native_parent);
+        let window_info = native_parent
+            .map(|parent| WindowInfo::default().set_as_child(parent, &content_rect_below_urlbar()))
+            .unwrap_or_default();
         let settings = BrowserSettings::default();
         let cef_url = CefString::from(url.as_str());
-        let mut browser_view_delegate = TabBrowserViewDelegate::new();
-        let browser_view = browser_view_create(
+        let browser = browser_host_create_browser_sync(
+            Some(&window_info),
             Some(&mut client),
             Some(&cef_url),
             Some(&settings),
             None,
             None,
-            Some(&mut browser_view_delegate),
         )
-        .expect("browser_view_create failed");
+        .expect("browser_host_create_browser_sync failed");
 
         let id = format!("tab-{}", next_tab_id());
-        mount_tab_in_switcher(id.clone(), &self.browser_switcher, browser_view.clone(), title.clone(), TabKind::Browser);
+        mount_tab(id.clone(), &self.browser_switcher, TabWidget::Browser(browser.clone()), title.clone(), TabKind::Browser);
 
         self.table
-            .push(BrowserTab { id, browser_view, title })
+            .push(BrowserTab { id, browser, title })
             .expect("resource table push failed")
     }
 }
@@ -1542,7 +1473,7 @@ struct ViewHandle {
 /// [`InputQueryHandler`] (routes every `window.cefQuery` call — input or
 /// a [`POLL_REQUEST`] — to the right View) and the life-span handler
 /// that maintains `browser_count`.
-struct InputBridge {
+pub(crate) struct InputBridge {
     store: Store<KernelState>,
     browser_count: u32,
     /// Every currently-open View, keyed by the id [`Kernel::open_view`]
@@ -1563,7 +1494,7 @@ struct InputBridge {
 /// Everything needed to open a new View or mirror an existing one in a
 /// new mounted tab: which Facets exist to instantiate, the live state
 /// ([`InputBridge`]) either needs to register itself into, and the one
-/// shared switcher ([`BrowserSwitcherState`]) every View's `BrowserView`
+/// shared switcher ([`BrowserSwitcherState`]) every View's [`TabWidget`]
 /// gets mounted into — the same one `create_tab` mounts browser tabs
 /// into, so a terminal session and a browser tab are just two entries
 /// in one list, switched between the same way.
@@ -1577,7 +1508,7 @@ impl Kernel {
     /// Instantiates `facet_name`'s Component fresh, calls its `render`
     /// against `node_id` to get its first View, and mounts that View as
     /// a new tab in the one shared switcher window (see
-    /// [`open_browser_switcher_window`]) — the same as
+    /// [`BrowserSwitcherState`]) — the same as
     /// [`Kernel::open_window`] would for any later tab mirroring this
     /// View, just with a fresh View instead of an existing one. Safe to
     /// call more than once against the same Facet: each call is an
@@ -1610,11 +1541,10 @@ impl Kernel {
 
     /// Same instantiate-and-render step as [`Kernel::open_view`], but
     /// mounts into the one *fixed* sidebar slot (see
-    /// [`Kernel::open_sidebar_view`]) instead of the switchable
-    /// `active_region` — for the "sidebar" Facet itself, which isn't a
-    /// tab to switch away from. Called once, from
-    /// `KernelBrowserProcessHandler::on_context_initialized`, after
-    /// [`open_browser_switcher_window`] builds the window it mounts into.
+    /// [`Kernel::open_sidebar_view`]) instead of the switchable tab
+    /// list — for the "sidebar" Facet itself, which isn't a tab to
+    /// switch away from. Called once, from [`WinitKernelApp::resumed`],
+    /// after the one native window exists for it to mount into.
     fn open_sidebar(&self, node_id: &str, facet_name: &str) -> Result<String> {
         let component = self.facets.component(facet_name)?;
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
@@ -1638,16 +1568,21 @@ impl Kernel {
         Ok(view_id)
     }
 
-    /// Instantiates the real `BrowserView` for View `view_id`'s current
-    /// HTML, registering a fresh window id for cefQuery routing — the
-    /// part [`Kernel::open_window`] (mounts into the switchable
-    /// `active_region`) and [`Kernel::open_sidebar_view`] (mounts once,
-    /// fixed) both need before deciding where the result goes. A real
-    /// `BrowserView` (Views framework), not the raw
-    /// `browser_host_create_browser` path — that's what lets this mount
-    /// anywhere in [`BrowserSwitcherState`] instead of getting its own
-    /// native window.
-    fn create_view_browser_view(&self, view_id: &str) -> Result<(String, BrowserView, Arc<Mutex<String>>)> {
+    /// Registers a fresh window id for cefQuery routing against View
+    /// `view_id`, then builds the actual [`TabWidget`] that renders
+    /// it — the part [`Kernel::open_window`] (mounts into the
+    /// switchable tab list) and [`Kernel::open_sidebar_view`] (mounts
+    /// once, fixed) both need before deciding where the result goes.
+    /// `rect` is the widget's initial bounds (mount sites decide their
+    /// own — a tab gets the full content region, [`sidebar_rect`] is
+    /// used for the sidebar). On macOS this is a transparent `wry`
+    /// webview (see [`mac::FacetWebView`]) so it can actually show the
+    /// background blur behind it — CEF's own `Browser` can never be
+    /// made transparent in windowed mode (upstream issue
+    /// chromiumembedded/cef#4035). Every other platform falls back to
+    /// a real classic-embedded CEF `Browser` (opaque — `wry`/the
+    /// background blur aren't wired up there yet).
+    fn create_facet_widget(&self, view_id: &str, rect: Rect) -> Result<(String, TabWidget, Arc<Mutex<String>>)> {
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
         let view = bridge
             .views
@@ -1665,34 +1600,59 @@ impl Kernel {
             .insert(window_id.clone(), String::new());
         bridge.windows.insert(window_id.clone(), view_id.to_string());
         let bridge_handle = self.bridge.clone();
-        // Dropped before calling into CEF: `browser_view_create` can
-        // turn around and call `LifeSpanHandler::on_after_created`
-        // (which also locks `self.bridge`) before this function
+        // Dropped before calling into CEF/`wry`: both can turn around
+        // and call back into a handler that also locks `self.bridge`
+        // (CEF's `LifeSpanHandler::on_after_created`, `wry`'s own IPC
+        // handler on the very first frame) before this function
         // returns, and `Mutex` isn't reentrant.
         drop(bridge);
 
-        // A fresh `Client` per View (not the single shared one Facet
-        // Views used to all reuse) — each needs its own title `Arc` so
-        // one View's `on_title_change` can't clobber another's, the
-        // same reason `create_tab` gives every browser tab its own
-        // `TabClient`.
         let title = Arc::new(Mutex::new(String::new()));
-        let mut client = ViewClient::new(bridge_handle, title.clone());
 
-        let settings = BrowserSettings::default();
-        let url = CefString::from(html_data_uri(&inject_window_id(&html, &window_id)).as_str());
-        let mut browser_view_delegate = TabBrowserViewDelegate::new();
-        let browser_view = browser_view_create(
-            Some(&mut client),
-            Some(&url),
-            Some(&settings),
-            None,
-            None,
-            Some(&mut browser_view_delegate),
-        )
-        .ok_or_else(|| anyhow!("browser_view_create failed"))?;
+        #[cfg(target_os = "macos")]
+        {
+            let native_window_handle = self
+                .browser_switcher
+                .lock()
+                .expect("browser switcher lock poisoned")
+                .as_ref()
+                .ok_or_else(|| anyhow!("no browser switcher window yet"))?
+                .native_window_handle;
+            let webview = mac::FacetWebView::new(
+                &native_window_handle,
+                &window_id,
+                &html,
+                cef_rect_to_wry(rect),
+                title.clone(),
+                bridge_handle,
+            )?;
+            Ok((window_id, TabWidget::Facet(webview), title))
+        }
 
-        Ok((window_id, browser_view, title))
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut client = ViewClient::new(bridge_handle, title.clone());
+            let native_parent = self
+                .browser_switcher
+                .lock()
+                .expect("browser switcher lock poisoned")
+                .as_ref()
+                .ok_or_else(|| anyhow!("no browser switcher window yet"))?
+                .native_parent;
+            let window_info = WindowInfo::default().set_as_child(native_parent, &rect);
+            let settings = BrowserSettings::default();
+            let url = CefString::from(html_data_uri(&inject_window_id(&html, &window_id)).as_str());
+            let browser = browser_host_create_browser_sync(
+                Some(&window_info),
+                Some(&mut client),
+                Some(&url),
+                Some(&settings),
+                None,
+                None,
+            )
+            .ok_or_else(|| anyhow!("browser_host_create_browser_sync failed"))?;
+            Ok((window_id, TabWidget::Browser(browser), title))
+        }
     }
 
     /// Mounts a new tab into the shared switcher window mirroring the
@@ -1701,50 +1661,34 @@ impl Kernel {
     /// `terminal-xterm`) as every other tab mirroring this View; output
     /// is fanned out to all of them via `pending` (see [`ViewHandle`]).
     fn open_window(&self, view_id: &str) -> Result<String> {
-        let (window_id, browser_view, title) = self.create_view_browser_view(view_id)?;
-        mount_tab_in_switcher(window_id.clone(), &self.browser_switcher, browser_view, title, TabKind::FacetView);
+        let (window_id, widget, title) = self.create_facet_widget(view_id, content_rect_full())?;
+        mount_tab(window_id.clone(), &self.browser_switcher, widget, title, TabKind::FacetView);
         Ok(window_id)
     }
 
-    /// Mounts View `view_id` into the one fixed sidebar slot, to the
-    /// left of `active_region` — not a switchable tab, so it doesn't go
-    /// through [`mount_tab_in_switcher`] at all. `add_child_view_at(..,
-    /// 0)` inserts it before `active_region` (added first, in
-    /// [`open_browser_switcher_window`], since the sidebar wasn't ready
-    /// yet) so it still ends up on the left.
+    /// Mounts View `view_id` as the sidebar — not a switchable tab, so
+    /// it doesn't go through [`mount_tab`] at all, just sits at
+    /// [`sidebar_rect`] for the lifetime of the window.
     fn open_sidebar_view(&self, view_id: &str) -> Result<String> {
-        let (window_id, browser_view, _title) = self.create_view_browser_view(view_id)?;
+        let (window_id, widget, _title) = self.create_facet_widget(view_id, sidebar_rect())?;
 
         let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
-        let switcher = guard
-            .as_mut()
-            .ok_or_else(|| anyhow!("no browser switcher window yet"))?;
-        let mut view = View::from(&browser_view);
-        // Full teardown and rebuild — remove `content_panel` (which
-        // holds the urlbar + `active_region` stacked vertically, see
-        // `open_browser_switcher_window`), then re-add both fresh,
-        // sidebar first — rather than `add_child_view_at(.., 0)` to
-        // insert the sidebar before an already-mounted, already-flexed
-        // sibling.
-        let mut content_panel_view = View::from(&switcher.content_panel);
-        switcher.root_panel.remove_child_view(Some(&mut content_panel_view));
-        switcher.root_panel.add_child_view(Some(&mut view));
-        switcher.root_panel.add_child_view(Some(&mut content_panel_view));
-        if let Some(root_layout) = &switcher.root_layout {
-            // Confirmed empirically (via bounds logging) that this
-            // binding's `set_flex_for_view` assigns shares inverted
-            // from every other CEF Views flex convention in this
-            // codebase: `view` (the sidebar) needs `CONTENT_FLEX` to
-            // end up with `SIDEBAR_FLEX`'s share, and vice versa for
-            // `content_panel`. Not a typo — verified three other
-            // "natural" orderings all produced the exact swap this
-            // avoids.
-            root_layout.set_flex_for_view(Some(&mut view), CONTENT_FLEX);
-            root_layout.set_flex_for_view(Some(&mut content_panel_view), SIDEBAR_FLEX);
-        }
-        switcher.root_panel.layout();
+        let switcher = guard.as_mut().ok_or_else(|| anyhow!("no browser switcher window yet"))?;
+        switcher.sidebar_widget = Some(widget);
 
         Ok(window_id)
+    }
+}
+
+/// `wry::Rect` uses the `dpi` crate's logical units; CEF's `Rect` is
+/// plain integer pixels in the same window-relative coordinate space
+/// `wry`'s `build_as_child`/`set_bounds` expect, so this is a straight
+/// field-for-field conversion, not a real unit transform.
+#[cfg(target_os = "macos")]
+fn cef_rect_to_wry(rect: Rect) -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(rect.x as f64, rect.y as f64).into(),
+        size: wry::dpi::LogicalSize::new(rect.width as f64, rect.height as f64).into(),
     }
 }
 
@@ -1763,6 +1707,28 @@ fn inject_window_id(html: &str, window_id: &str) -> String {
             format!("{}{script}{}", &html[..insert_at], &html[insert_at..])
         }
         None => format!("{script}{html}"),
+    }
+}
+
+/// Forces `html`/`body` transparent, `!important` so it wins regardless
+/// of whatever opaque background a Facet's own CSS set (every current
+/// Facet — `terminal-xterm`, `graph-view`, `extensions` — authors an
+/// opaque one, since they were written before this host-level
+/// requirement existed) — applied to every Facet View's page (not real
+/// browser tabs, which stay fully opaque regardless) so the window's
+/// background blur actually shows through wherever one is active, the
+/// same way [`inject_window_id`] splices in host-owned behavior
+/// without any Facet needing to know about it. Same insertion point as
+/// `inject_window_id`, applied after it so both end up right after
+/// `<head>`.
+fn inject_transparent_background(html: &str) -> String {
+    let style = "<style>html, body { background: transparent !important; }</style>";
+    match html.find("<head>") {
+        Some(idx) => {
+            let insert_at = idx + "<head>".len();
+            format!("{}{style}{}", &html[..insert_at], &html[insert_at..])
+        }
+        None => format!("{style}{html}"),
     }
 }
 
@@ -1795,17 +1761,61 @@ struct InputQueryHandler {
 /// the whole way, not a Task.
 const POLL_REQUEST: &str = "__poll__";
 
+/// Shared by every transport that can carry a Facet request —
+/// currently CEF's `cefQuery` (`InputQueryHandler::on_query_str`) and
+/// `wry`'s IPC handler (`FacetWebView`, used for the sidebar/urlbar/
+/// non-browser Facets so they can live in a transparent native webview
+/// instead of an opaque CEF `BrowserView` — see CEF issue #4035). Both
+/// just parse the same `<window-id>:<event>` shape and land here, so
+/// there's exactly one place that knows how to resolve a window id to
+/// a View and call `handle-input`/`poll-output` on it. `event` is
+/// either [`POLL_REQUEST`] (answered from `poll-output`, fanned out to
+/// every Window mirroring this View — see [`ViewHandle`]) or real
+/// input (answered from `handle-input`, which reaches the exact same
+/// Facet instance no matter which mirroring Window sent it).
+fn dispatch_facet_request(bridge: &Arc<Mutex<InputBridge>>, request: &str) -> Result<String, String> {
+    let Some((window_id, event)) = request.split_once(':') else {
+        return Err("malformed request: missing <window-id>: prefix".to_string());
+    };
+
+    let mut bridge = bridge.lock().expect("input bridge lock poisoned");
+    let InputBridge { store, views, windows, .. } = &mut *bridge;
+    let Some(view_id) = windows.get(window_id) else {
+        return Err(format!("no such window: {window_id}"));
+    };
+    let Some(view) = views.get_mut(view_id) else {
+        return Err(format!("no such view: {view_id}"));
+    };
+
+    if event == POLL_REQUEST {
+        return view
+            .bindings
+            .rashomon_facet_contract()
+            .call_poll_output(store)
+            .map(|output| {
+                if !output.is_empty() {
+                    for pending in view.pending.values_mut() {
+                        pending.push_str(&output);
+                    }
+                }
+                view.pending.get_mut(window_id).map(std::mem::take).unwrap_or_default()
+            })
+            .map_err(|e| e.to_string());
+    }
+
+    view.bindings
+        .rashomon_facet_contract()
+        .call_handle_input(store, event)
+        .map(|_| "ok".to_string())
+        .map_err(|e| e.to_string())
+}
+
 impl BrowserSideHandler for InputQueryHandler {
     /// `request` is always `<window-id>:<event>` — every Window's page
     /// prefixes it that way before calling `window.cefQuery` (see
     /// `terminal-xterm`'s `render_page`) so this one handler, shared by
-    /// every open Window, can dispatch to the right View. `event` is
-    /// either [`POLL_REQUEST`] (answered from `poll-output`, fanned out
-    /// to every Window mirroring this View — see [`ViewHandle`]) or
-    /// real input (answered from `handle-input`, which reaches the
-    /// exact same Facet instance no matter which mirroring Window sent
-    /// it, so e.g. a PTY's own echo of typed input becomes output every
-    /// mirroring Window's next poll picks up too).
+    /// every open Window, can dispatch to the right View via
+    /// [`dispatch_facet_request`].
     fn on_query_str(
         &self,
         _browser: Option<Browser>,
@@ -1816,43 +1826,9 @@ impl BrowserSideHandler for InputQueryHandler {
         callback: Arc<Mutex<dyn BrowserSideCallback>>,
     ) -> bool {
         let callback = callback.lock().expect("callback lock poisoned");
-        let Some((window_id, event)) = request.split_once(':') else {
-            callback.failure(-1, "malformed request: missing <window-id>: prefix");
-            return true;
-        };
-
-        let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
-        let InputBridge { store, views, windows, .. } = &mut *bridge;
-        let Some(view_id) = windows.get(window_id) else {
-            callback.failure(-1, &format!("no such window: {window_id}"));
-            return true;
-        };
-        let Some(view) = views.get_mut(view_id) else {
-            callback.failure(-1, &format!("no such view: {view_id}"));
-            return true;
-        };
-
-        if event == POLL_REQUEST {
-            let result = view.bindings.rashomon_facet_contract().call_poll_output(store);
-            match result {
-                Ok(output) => {
-                    if !output.is_empty() {
-                        for pending in view.pending.values_mut() {
-                            pending.push_str(&output);
-                        }
-                    }
-                    let delivered = view.pending.get_mut(window_id).map(std::mem::take).unwrap_or_default();
-                    callback.success_str(&delivered)
-                }
-                Err(e) => callback.failure(-1, &e.to_string()),
-            }
-            return true;
-        }
-
-        let result = view.bindings.rashomon_facet_contract().call_handle_input(store, event);
-        match result {
-            Ok(_) => callback.success_str("ok"),
-            Err(e) => callback.failure(-1, &e.to_string()),
+        match dispatch_facet_request(&self.bridge, request) {
+            Ok(response) => callback.success_str(&response),
+            Err(e) => callback.failure(-1, &e),
         }
         true
     }
@@ -1913,99 +1889,35 @@ wrap_life_span_handler! {
             if let Some(router) = BROWSER_ROUTER.get() {
                 router.on_before_close(browser.cloned());
             }
-            let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
-            bridge.browser_count -= 1;
-            if bridge.browser_count == 0 {
-                quit_message_loop();
-            }
+            self.bridge.lock().expect("input bridge lock poisoned").browser_count -= 1;
+            // No more "last browser closes -> quit the app" behavior
+            // (there used to be a `quit_message_loop()` call here): with
+            // one persistent window hosting many tabs, closing one
+            // tab/popup shouldn't close the whole app, and
+            // `quit_message_loop()` itself only makes sense paired with
+            // CEF's own `run_message_loop()`, which this no longer
+            // uses (see `WinitKernelApp`/`external_message_pump`). The
+            // window's own close button exits via `winit`'s
+            // `WindowEvent::CloseRequested` instead.
         }
     }
 }
 
-// `initial_views` is `(node_id, facet_name, window_count)` — each entry
-// opens one View (one `node_id`/`facet_name` Facet instantiation) and
-// then mirrors it into `window_count` total Windows via
-// `Kernel::open_window`, so `window_count > 1` is how the "two Windows,
-// one shared terminal session" demo in `run_browser_process` is
-// expressed.
+// `winit` drives the blocking run loop now (see `WinitKernelApp`), so
+// CEF is configured with `external_message_pump: 1` and this handler's
+// only remaining job is to *not* schedule anything — `about_to_wait`
+// unconditionally pumps CEF on every tick instead of precisely
+// respecting `delay_ms`, which is simpler and fine for a single-window
+// desktop app. Window/tab/sidebar setup (previously done here, in
+// `on_context_initialized`, since that used to be the earliest hook
+// with a CEF context ready) has moved to `WinitKernelApp::resumed`,
+// since it needs the native window `winit` creates, which doesn't
+// exist yet by the time `on_context_initialized` fires.
 wrap_browser_process_handler! {
-    struct KernelBrowserProcessHandler {
-        kernel: Arc<Kernel>,
-        initial_views: Arc<Vec<(String, String, u32)>>,
-        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
-        browser_component: Option<Arc<Component>>,
-        browser_demo_node_id: String,
-    }
+    struct KernelBrowserProcessHandler {}
 
     impl BrowserProcessHandler {
-        /// Builds the one shared `Client`/`InputQueryHandler` pair every
-        /// Window this process ever opens reuses, then opens every
-        /// startup View and its Windows — each one a real
-        /// `browser_host_create_browser` call via [`Kernel::open_view`]/
-        /// [`Kernel::open_window`], so this doesn't need to wait on any
-        /// page load the way the iframe-pane design (see the module doc
-        /// comment) needed to.
-        fn on_context_initialized(&self) {
-            let router = BROWSER_ROUTER.get_or_init(|| BrowserSideRouter::new(message_router_config()));
-            router.add_handler(
-                Arc::new(InputQueryHandler {
-                    bridge: self.kernel.bridge.clone(),
-                }),
-                false,
-            );
-
-            // Must happen before the `browser` Facet's `render()` call
-            // below — `create-tab` needs `browser_switcher` to already
-            // be `Some(..)` so it has somewhere to mount the tabs it
-            // creates.
-            open_browser_switcher_window(&self.browser_switcher);
-
-            if let Some(browser_component) = &self.browser_component {
-                let mut bridge = self.kernel.bridge.lock().expect("input bridge lock poisoned");
-                let result = FacetWorld::instantiate(&mut bridge.store, browser_component, &self.kernel.facets.linker)
-                    .map_err(|e| anyhow!("failed to instantiate browser component: {e}"))
-                    .and_then(|bindings| {
-                        bindings
-                            .rashomon_facet_contract()
-                            .call_render(&mut bridge.store, &self.browser_demo_node_id)
-                            .map_err(|e| anyhow!("browser component's render() failed: {e}"))
-                    });
-                drop(bridge);
-                match result {
-                    Ok(summary) => println!("browser component rendered: {summary}"),
-                    Err(e) => eprintln!("{e}"),
-                }
-            }
-
-            for (node_id, facet_name, window_count) in self.initial_views.iter() {
-                let view_id = match self.kernel.open_view(node_id, facet_name) {
-                    Ok(view_id) => view_id,
-                    Err(e) => {
-                        eprintln!("failed to open initial view for {facet_name}: {e}");
-                        continue;
-                    }
-                };
-                for _ in 1..*window_count {
-                    if let Err(e) = self.kernel.open_window(&view_id) {
-                        eprintln!("failed to open mirror window for {facet_name}: {e}");
-                    }
-                }
-            }
-
-            // The sidebar is a real Facet Component (`components/sidebar`),
-            // not inline host code — see `open_browser_switcher_window`'s
-            // doc comment. Opened *last*, after real content is already
-            // mounted into `active_region`: confirmed empirically
-            // (three different attempts at the box-layout mechanics
-            // all produced the exact same swapped 78/22 split) that
-            // opening it while `active_region` was still empty — no
-            // preferred/intrinsic size of its own to assert yet — let
-            // the sidebar's own rendered page win the tug-of-war for
-            // space regardless of flex settings.
-            if let Err(e) = self.kernel.open_sidebar("sidebar-view", "sidebar") {
-                eprintln!("failed to open sidebar: {e}");
-            }
-        }
+        fn on_schedule_message_pump_work(&self, _delay_ms: i64) {}
     }
 }
 
@@ -2057,26 +1969,12 @@ wrap_render_process_handler! {
 
 wrap_app! {
     pub struct KernelApp {
-        kernel: Option<Arc<Kernel>>,
-        initial_views: Option<Arc<Vec<(String, String, u32)>>>,
         extension_configs: Arc<Vec<BrowserExtensionConfig>>,
-        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
-        browser_component: Option<Arc<Component>>,
-        browser_demo_node_id: String,
     }
 
     impl App {
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
-            let (Some(kernel), Some(initial_views)) = (self.kernel.clone(), self.initial_views.clone()) else {
-                return None;
-            };
-            Some(KernelBrowserProcessHandler::new(
-                kernel,
-                initial_views,
-                self.browser_switcher.clone(),
-                self.browser_component.clone(),
-                self.browser_demo_node_id.clone(),
-            ))
+            Some(KernelBrowserProcessHandler::new())
         }
 
         fn render_process_handler(&self) -> Option<RenderProcessHandler> {
@@ -2114,6 +2012,200 @@ wrap_app! {
     }
 }
 
+/// `winit`'s `ApplicationHandler` — the one blocking run loop this
+/// process actually uses (see the module doc comment); CEF is pumped
+/// from inside [`WinitKernelApp::about_to_wait`] instead of owning its
+/// own. All of the windowing setup that used to live in
+/// `KernelBrowserProcessHandler::on_context_initialized` moved to
+/// [`WinitKernelApp::resumed`] instead, since it needs the native
+/// window `winit` creates — which, unlike CEF's own Views `Window`,
+/// doesn't exist yet by the time CEF's context finishes initializing.
+struct WinitKernelApp {
+    kernel: Arc<Kernel>,
+    initial_views: Arc<Vec<(String, String, u32)>>,
+    browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+    browser_component: Arc<Component>,
+    browser_demo_node_id: String,
+    window: Option<Window>,
+}
+
+impl WinitKernelApp {
+    /// Re-derives the window's raw `NSView*` and calls
+    /// [`mac::apply_background_blur`] again — see
+    /// [`WinitKernelApp::window_event`]'s doc comment for why this
+    /// needs to happen more than once.
+    #[cfg(target_os = "macos")]
+    fn reapply_background_blur(&self) {
+        let Some(window) = &self.window else { return };
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+        mac::apply_background_blur(handle.ns_view.as_ptr().cast(), 40);
+    }
+}
+
+impl ApplicationHandler for WinitKernelApp {
+    /// Fires once, before the event loop starts ticking — builds the
+    /// one native window every tab/the sidebar/the urlbar attach to,
+    /// then does everything `on_context_initialized` used to:
+    /// registers the message-router handler, renders the `browser`
+    /// Facet's demo `create-tab` calls, opens every startup View (and
+    /// its mirror Windows), and opens the sidebar last (after real
+    /// tab content already exists — matters for the sidebar Facet's
+    /// own `list-tabs` polling to see something non-empty right away).
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let mut attrs = Window::default_attributes()
+            .with_title("Rashomon")
+            .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH_PX as f64, WINDOW_HEIGHT_PX as f64))
+            // Resizable even though there's no live-resize layout
+            // handling yet (see the rect helpers' doc comment — tabs/
+            // sidebar/urlbar keep their original fixed bounds, which
+            // will look wrong after a resize until that's built) —
+            // disabling resize entirely was a bigger cost than that
+            // cosmetic gap, since it also silently disabled *moving*
+            // the window edge-to-edge for testing things like
+            // `reapply_background_blur`.
+            // `winit` windows are opaque by default — needed in
+            // addition to `wry`'s own per-webview transparency so the
+            // background blur is actually visible anywhere a
+            // transparent Facet/sidebar/urlbar webview renders.
+            .with_transparent(true);
+        #[cfg(target_os = "macos")]
+        {
+            attrs = attrs
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true)
+                .with_movable_by_window_background(true);
+        }
+        let window = event_loop.create_window(attrs).expect("create_window failed");
+
+        let raw_handle = window.window_handle().expect("window_handle failed").as_raw();
+
+        #[cfg(target_os = "macos")]
+        let native_window_handle = {
+            let RawWindowHandle::AppKit(handle) = raw_handle else {
+                panic!("expected an AppKit window handle on macOS");
+            };
+            let ptr: *mut std::ffi::c_void = handle.ns_view.as_ptr().cast();
+            mac::apply_background_blur(ptr, 40);
+            mac::NativeWindowHandle::from_ns_view_ptr(ptr)
+                .expect("window_handle should be realized right after create_window")
+        };
+
+        let native_parent: cef::sys::cef_window_handle_t = match raw_handle {
+            #[cfg(target_os = "macos")]
+            RawWindowHandle::AppKit(handle) => handle.ns_view.as_ptr().cast(),
+            #[cfg(target_os = "windows")]
+            RawWindowHandle::Win32(handle) => handle.hwnd.get() as cef::sys::cef_window_handle_t,
+            #[cfg(target_os = "linux")]
+            RawWindowHandle::Xlib(handle) => handle.window as cef::sys::cef_window_handle_t,
+            _ => panic!("unsupported platform/window handle kind for this architecture"),
+        };
+
+        #[cfg(target_os = "macos")]
+        let urlbar = {
+            let browser_switcher = self.browser_switcher.clone();
+            mac::UrlBarWebView::new(&native_window_handle, cef_rect_to_wry(urlbar_rect()), move |text| {
+                let url = normalize_url_input(&text);
+                if let Some(switcher) = browser_switcher.lock().expect("browser switcher lock poisoned").as_ref() {
+                    switcher.navigate_active(&url);
+                }
+            })
+            .expect("urlbar webview creation failed")
+        };
+
+        *self.browser_switcher.lock().expect("browser switcher lock poisoned") = Some(BrowserSwitcherState {
+            #[cfg(target_os = "macos")]
+            native_window_handle,
+            native_parent,
+            #[cfg(target_os = "macos")]
+            urlbar,
+            tabs: Vec::new(),
+            active_index: 0,
+            sidebar_widget: None,
+        });
+
+        let router = BROWSER_ROUTER.get_or_init(|| BrowserSideRouter::new(message_router_config()));
+        router.add_handler(Arc::new(InputQueryHandler { bridge: self.kernel.bridge.clone() }), false);
+
+        {
+            let mut bridge = self.kernel.bridge.lock().expect("input bridge lock poisoned");
+            let result = FacetWorld::instantiate(&mut bridge.store, &self.browser_component, &self.kernel.facets.linker)
+                .map_err(|e| anyhow!("failed to instantiate browser component: {e}"))
+                .and_then(|bindings| {
+                    bindings
+                        .rashomon_facet_contract()
+                        .call_render(&mut bridge.store, &self.browser_demo_node_id)
+                        .map_err(|e| anyhow!("browser component's render() failed: {e}"))
+                });
+            drop(bridge);
+            match result {
+                Ok(summary) => println!("browser component rendered: {summary}"),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+
+        for (node_id, facet_name, window_count) in self.initial_views.iter() {
+            let view_id = match self.kernel.open_view(node_id, facet_name) {
+                Ok(view_id) => view_id,
+                Err(e) => {
+                    eprintln!("failed to open initial view for {facet_name}: {e}");
+                    continue;
+                }
+            };
+            for _ in 1..*window_count {
+                if let Err(e) = self.kernel.open_window(&view_id) {
+                    eprintln!("failed to open mirror window for {facet_name}: {e}");
+                }
+            }
+        }
+
+        // The sidebar is a real Facet Component (`components/sidebar`),
+        // not inline host code. Opened last, after real tab content
+        // already exists, so the sidebar Facet's own `list-tabs`
+        // polling has something non-empty to show immediately.
+        if let Err(e) = self.kernel.open_sidebar("sidebar-view", "sidebar") {
+            eprintln!("failed to open sidebar: {e}");
+        }
+
+        self.window = Some(window);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            // The private CGS blur call needs reapplying after the
+            // window server's own compositing state for this window
+            // changes — confirmed empirically: it's visible right after
+            // creation, then silently drops out the next time the
+            // window is resized, moved, or regains key status (e.g.
+            // after clicking back into it from another app). Simplest
+            // fix found was to just reapply it on exactly those
+            // `winit` events, rather than depend on a single call at
+            // startup surviving every future compositing change.
+            #[cfg(target_os = "macos")]
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::Focused(true) => {
+                self.reapply_background_blur();
+            }
+            _ => {}
+        }
+    }
+
+    /// Runs on every tick of `winit`'s own loop (`ControlFlow::Poll`
+    /// below keeps it ticking continuously) — pumping unconditionally
+    /// here is simpler than precisely respecting
+    /// `KernelBrowserProcessHandler::on_schedule_message_pump_work`'s
+    /// `delay_ms`, and fine for a single-window desktop app.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        do_message_loop_work();
+        event_loop.set_control_flow(ControlFlow::Poll);
+    }
+}
+
 /// An `App` with no `Kernel` yet — used for the initial `execute_process`
 /// dispatch by *both* binaries, before we know whether this invocation is
 /// the browser process (which gets a real `KernelApp` later, via
@@ -2122,14 +2214,7 @@ wrap_app! {
 /// `render_process_handler()` still works without a `Kernel`, which it
 /// does).
 pub fn make_minimal_app() -> App {
-    KernelApp::new(
-        None,
-        None,
-        Arc::new(Vec::new()),
-        Arc::new(Mutex::new(None)),
-        None,
-        String::new(),
-    )
+    KernelApp::new(Arc::new(Vec::new()))
 }
 
 /// Everything that happens once we know this process is the CEF browser
@@ -2348,16 +2433,14 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         (thread_id, "extensions".to_string(), 1u32),
     ]);
 
-    let mut app = KernelApp::new(
-        Some(kernel),
-        Some(initial_views),
-        extension_configs,
-        browser_switcher,
-        Some(Arc::new(browser_component)),
-        browser_demo_node_id,
-    );
+    let mut app = KernelApp::new(extension_configs);
     let settings = Settings {
         no_sandbox: 1,
+        // `winit` owns the blocking run loop (see `WinitKernelApp`
+        // below) — CEF is pumped from inside it instead of owning its
+        // own via `run_message_loop()`, the same `external_message_pump`
+        // integration `crates/cef-winit-spike` validated.
+        external_message_pump: 1,
         ..Default::default()
     };
     ensure!(
@@ -2368,7 +2451,18 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     #[cfg(target_os = "macos")]
     let _delegate = mac::setup_kernel_app_delegate();
 
-    run_message_loop();
+    let event_loop = EventLoop::new().context("winit EventLoop::new failed")?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut winit_app = WinitKernelApp {
+        kernel,
+        initial_views,
+        browser_switcher,
+        browser_component: Arc::new(browser_component),
+        browser_demo_node_id,
+        window: None,
+    };
+    event_loop.run_app(&mut winit_app).context("winit run_app failed")?;
+
     shutdown();
 
     Ok(())

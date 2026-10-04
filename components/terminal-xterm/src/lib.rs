@@ -35,16 +35,18 @@ impl Guest for Component {
     /// input uses. Input (`term.onData` -> `window.cefQuery` ->
     /// `handle_input` below) is real too, wired through
     /// rashomon-kernel's CEF message router. This Facet is instantiated
-    /// once per open View, each with its own `bash` (`SESSION` is
+    /// once per open View, each with its own instance of the user's
+    /// default shell (`spawner::default-shell` — `SESSION` is
     /// per-instance) — but a View isn't the same as a Window:
     /// `Kernel::open_window` can mirror one View's `render` output into
     /// more than one Window, all sharing this exact instance (and so
-    /// this exact `bash`), which is why this guest has no notion of
-    /// "Window" at all — that routing is purely host-side.
+    /// this exact shell session), which is why this guest has no
+    /// notion of "Window" at all — that routing is purely host-side.
     fn render(node_id: String) -> String {
         SESSION.with_borrow_mut(|session| {
             if session.is_none() {
-                let process = match spawner::spawn("bash", &[], None) {
+                let shell = spawner::default_shell();
+                let process = match spawner::spawn(&shell, &[], None) {
                     Ok(process) => process,
                     Err(err) => return format!("terminal-xterm: failed to spawn: {err}"),
                 };
@@ -80,7 +82,33 @@ impl Guest for Component {
     /// `vt100` Facet. `event` has already had its `<window-id>:` routing
     /// prefix stripped by the host's `InputQueryHandler` before this is
     /// called — this Facet has no notion of Windows, only PTY bytes.
+    ///
+    /// One exception: a leading `"\u{1}"` marks a resize notification
+    /// (`"\u{1}resize:<cols>,<rows>"`) rather than real keystroke/paste
+    /// bytes — the page's own JS (see `render_page`) sends this
+    /// whenever it refits `xterm.js`'s grid to its actual on-screen
+    /// size, so the real PTY (and whatever's running in it, e.g. a
+    /// full-screen program) agrees on the terminal's dimensions
+    /// instead of staying stuck at the hardcoded 80x24 this Facet used
+    /// to always open with. `\u{1}` (SOH) rather than a plain word
+    /// prefix like `"resize:"` specifically because this channel *is*
+    /// otherwise raw PTY bytes verbatim — picked as a control
+    /// character no real keystroke or paste ever actually produces,
+    /// so it can't collide with legitimate input the way a printable
+    /// prefix could.
     fn handle_input(event: String) -> Vec<String> {
+        if let Some(dims) = event.strip_prefix('\u{1}').and_then(|s| s.strip_prefix("resize:")) {
+            if let Some((cols, rows)) = dims.split_once(',') {
+                if let (Ok(cols), Ok(rows)) = (cols.parse::<u32>(), rows.parse::<u32>()) {
+                    SESSION.with_borrow(|session| {
+                        if let Some(process) = session.as_ref() {
+                            let _ = process.resize(cols, rows);
+                        }
+                    });
+                }
+            }
+            return Vec::new();
+        }
         SESSION.with_borrow_mut(|session| {
             if let Some(process) = session.as_ref() {
                 let _ = process.write(event.as_bytes());
@@ -140,15 +168,72 @@ fn render_page(initial_output: &str) -> String {
 <title>Terminal</title>
 <meta charset="utf-8" />
 <style>{xterm_css}</style>
-<style>html, body {{ margin: 0; background: #202830; }}</style>
+<style>
+  /* `height: 100%` on both — the default `html`/`body` only grow to
+     fit their content's natural height, not the viewport, so without
+     this the terminal grid below can only ever be as tall as whatever
+     `xterm.js` happens to size itself to, not the other way around. */
+  html, body {{ margin: 0; height: 100%; background: transparent; }}
+  /* Fills the whole webview (itself already sized to the full content
+     region by the host — see `mac::FacetWebView`) so `fitTerminal`
+     below has the actual available space to measure against, not
+     xterm.js's initial 80x24 default. */
+  #terminal {{ width: 100%; height: 100%; }}
+</style>
 </head>
 <body>
 <div id="terminal"></div>
 <script>{xterm_js}</script>
 <script>
-  const term = new Terminal({{ cols: 80, rows: 24 }});
+  // `allowTransparency` is required for xterm.js's own canvas renderer
+  // to honor a non-opaque `theme.background` at all — without it, the
+  // canvas paints fully opaque regardless of what's set here, which is
+  // why just making the surrounding page transparent (above) wasn't
+  // enough on its own.
+  const term = new Terminal({{
+    cols: 80,
+    rows: 24,
+    allowTransparency: true,
+    theme: {{ background: 'rgba(0, 0, 0, 0)' }},
+    // The "Mono" variant (not plain "...Nerd Font") is the one Nerd
+    // Fonts patches to keep its icon/powerline glyphs exactly
+    // one-cell-wide — without that, icons can throw off column
+    // alignment in a real monospace grid like xterm.js's. Both names
+    // are tried (a Nerd Fonts install can register either, depending
+    // on how it was installed) before falling back to a generic
+    // monospace font if neither is actually installed.
+    fontFamily: "'JetBrainsMono Nerd Font Mono', 'JetBrainsMono Nerd Font', monospace",
+  }});
   term.open(document.getElementById('terminal'));
   term.write('{initial}');
+
+  // No bundled fit addon (this project vendors `xterm.js` itself
+  // rather than pulling from a CDN — see the doc comment on
+  // `XTERM_JS` — and the official `addon-fit` is a separate package
+  // this doesn't vendor) — `_renderService.dimensions.css.cell` is
+  // `_core`'s own already-measured real cell size in CSS pixels
+  // (exactly what `addon-fit` itself reads internally; there's no
+  // *public* API for this in xterm.js as of this vendored version),
+  // reused here instead of re-deriving font metrics by hand, which
+  // would drift from whatever xterm.js's own renderer actually used.
+  function fitTerminal() {{
+    const el = document.getElementById('terminal');
+    const dims = term._core && term._core._renderService && term._core._renderService.dimensions;
+    const cell = dims && dims.css && dims.css.cell;
+    if (!cell || !cell.width || !cell.height) return;
+    const cols = Math.max(2, Math.floor(el.clientWidth / cell.width));
+    const rows = Math.max(1, Math.floor(el.clientHeight / cell.height));
+    if (cols === term.cols && rows === term.rows) return;
+    term.resize(cols, rows);
+    // `windowId` isn't declared until below, but is already set by
+    // the time this ever actually runs (only from the event listeners
+    // further down, never synchronously here).
+    window.cefQuery({{
+      request: windowId + ':\u0001resize:' + cols + ',' + rows,
+      onSuccess: function () {{}},
+      onFailure: function () {{}},
+    }});
+  }}
 
   // The host's message router registers `window.cefQuery` in this
   // context (see rashomon-kernel's RenderProcessHandler) and routes it
@@ -169,6 +254,15 @@ fn render_page(initial_output: &str) -> String {
       onFailure: function () {{}},
     }});
   }});
+
+  // `window`'s size here tracks this webview's own frame, not some
+  // unrelated top-level browser window — WebKit fires `resize` on it
+  // whenever the host repositions/resizes the native view this page
+  // is rendering into (see `mac::set_view_frame`), e.g. when this tab
+  // becomes active again after another tab was. The immediate call
+  // covers the very first layout, before any such event has fired.
+  fitTerminal();
+  window.addEventListener('resize', fitTerminal);
 
   // Live output between renders is *pulled*, not pushed: this page
   // polls itself rather than the host injecting `term.write(...)` via

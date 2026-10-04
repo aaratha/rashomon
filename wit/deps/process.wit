@@ -20,4 +20,11 @@ interface spawner {
     use types.{process};
 
     spawn: func(command: string, args: list<string>, cwd: option<string>) -> result<process, string>;
+
+    /// The user's own configured interactive shell for this platform
+    /// (e.g. honors `chsh` on Unix) — a Component that just wants "a
+    /// normal shell" should call this instead of hardcoding `bash` (or
+    /// any other shell) directly, so a terminal Facet matches whatever
+    /// the user has actually set as their default.
+    default-shell: func() -> string;
 }

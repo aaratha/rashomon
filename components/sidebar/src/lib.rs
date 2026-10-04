@@ -84,7 +84,11 @@ const PAGE: &str = r#"<!doctype html>
 <title>Sidebar</title>
 <meta charset="utf-8" />
 <style>
-  html, body { margin: 0; height: 100%; background: #1e1e1e; color: #eee; font-family: -apple-system, sans-serif; }
+  /* Translucent, not opaque — experimental test of whether the native
+     Liquid Glass layer behind this page (see rashomon-kernel's
+     `mac::apply_liquid_glass_background`) actually shows through a
+     windowed (non-OSR) `BrowserView`'s content at all. */
+  html, body { margin: 0; height: 100%; background: rgba(30, 30, 30, 0.55); color: #eee; font-family: -apple-system, sans-serif; }
   /* padding-top leaves room for the host's native traffic-light
      buttons, drawn over this page's top-left corner — without it the
      first button would sit right under them. */
@@ -93,7 +97,9 @@ const PAGE: &str = r#"<!doctype html>
     padding: 8px 10px;
     border: none;
     border-radius: 6px;
-    background: #333;
+    /* Translucent rather than solid — matches the sidebar's own glass
+       background instead of sitting on top of it as an opaque block. */
+    background: rgba(255, 255, 255, 0.08);
     color: #eee;
     cursor: pointer;
     text-align: left;
@@ -110,7 +116,7 @@ const PAGE: &str = r#"<!doctype html>
     white-space: nowrap;
     display: block;
   }
-  button:hover { background: #444; }
+  button:hover { background: rgba(255, 255, 255, 0.16); }
   #tabs { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 </style>
 </head>
