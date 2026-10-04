@@ -140,6 +140,21 @@ const PAGE: &str = r#"<!doctype html>
     query('toggle-popup');
   };
 
+  // Lets any non-interactive area of the sidebar (not a button, link,
+  // etc.) drag-move the window, the same way clicking a real titlebar
+  // would — this window's own titlebar is hidden (see
+  // `rashomon-kernel`'s `WinitKernelApp::resumed`), and
+  // `with_movable_by_window_background` alone doesn't reach here since
+  // this whole region is a `wry` webview covering the window's
+  // background, not the background itself. `window.ipc.postMessage`
+  // directly, not the `cefQuery`/`query()` shim above — this is a
+  // one-way host-chrome signal, not a Facet request with a response
+  // to wait for.
+  document.getElementById('sidebar').addEventListener('mousedown', function (e) {
+    if (e.target.closest('button, a, input, textarea, select')) return;
+    window.ipc.postMessage(JSON.stringify({ type: 'start-drag' }));
+  });
+
   let lastTabsKey = '';
   function refreshTabs() {
     query('__poll__', function (response) {

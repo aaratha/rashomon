@@ -133,6 +133,14 @@ impl NativeWindowHandle {
     pub(crate) fn from_ns_view_ptr(ptr: *mut std::ffi::c_void) -> Option<Self> {
         NonNull::new(ptr).map(Self)
     }
+
+    /// The raw `NSView*` itself — needed by [`FacetWebView::build`] to
+    /// later recover the owning `NSWindow` for [`start_window_drag`],
+    /// since that has to happen long after this handle's borrow (used
+    /// only to attach the webview as a child) has ended.
+    pub(crate) fn as_raw(&self) -> *mut std::ffi::c_void {
+        self.0.as_ptr()
+    }
 }
 
 impl HasWindowHandle for NativeWindowHandle {
@@ -231,6 +239,36 @@ pub(crate) fn apply_background_blur(ns_view_ptr: *mut std::ffi::c_void, radius: 
     }
 }
 
+/// Starts a native window-move drag, as if the user had clicked the
+/// (hidden, on this frameless window) titlebar — this is what makes
+/// dragging a non-interactive region of a `wry`-hosted Facet (the
+/// sidebar, say) actually move the window, something
+/// `with_movable_by_window_background` alone can't do once a webview
+/// covers that region entirely (mouse events over it go to the
+/// webview, never reaching the window's own background at all).
+/// `ns_view_ptr` only needs to be *some* view belonging to the target
+/// window — used here to recover the `NSWindow`, not for its own
+/// sake. `NSApp.currentEvent()` stands in for "the original mouseDown
+/// event" `performWindowDragWithEvent`'s own docs ask for: since this
+/// runs synchronously inside the same IPC round trip the page's own
+/// `mousedown` handler triggered, the event AppKit is still mid-
+/// dispatching *is* that same mouseDown — the same trick Tauri's own
+/// `start_dragging` command uses for this exact "draggable region
+/// inside a webview" need.
+pub(crate) fn start_window_drag(ns_view_ptr: *mut std::ffi::c_void) {
+    let ns_view = unsafe { &*(ns_view_ptr as *const NSView) };
+    let Some(window) = ns_view.window() else {
+        eprintln!("start_window_drag: view has no owning window yet");
+        return;
+    };
+    let mtm = MainThreadMarker::new().expect("not on main thread");
+    let Some(event) = NSApp(mtm).currentEvent() else {
+        eprintln!("start_window_drag: no current event to drag with");
+        return;
+    };
+    window.performWindowDragWithEvent(&event);
+}
+
 /// A tiny polyfill making `window.cefQuery({request, onSuccess, onFailure})`
 /// work the same way on top of `wry`'s one-way `window.ipc.postMessage`
 /// transport — injected into every page this hosts so every existing
@@ -288,6 +326,12 @@ impl FacetWebView {
         let full_html = crate::inject_transparent_background(&crate::inject_window_id(html, window_id));
         let cell: Arc<std::sync::OnceLock<wry::WebView>> = Arc::new(std::sync::OnceLock::new());
         let cell_for_ipc = cell.clone();
+        // Copied (not borrowed) — `NativeWindowHandle` is `Copy` and
+        // already asserts `Send` under the same "stays on the one UI
+        // thread" invariant as everything else here, which a bare
+        // `*mut c_void` captured directly in this closure wouldn't
+        // (raw pointers aren't `Send` on their own).
+        let parent_handle = *parent;
 
         let webview = wry::WebViewBuilder::new()
             .with_bounds(bounds)
@@ -298,8 +342,17 @@ impl FacetWebView {
                 *title.lock().expect("title lock poisoned") = new_title;
             })
             .with_ipc_handler(move |request: wry::http::Request<String>| {
-                let Some(webview) = cell_for_ipc.get() else { return };
                 let Ok(parsed) = serde_json::from_str::<serde_json::Value>(request.body()) else { return };
+                // Host-chrome concern, not a Facet request — handled
+                // here rather than reaching `dispatch_facet_request`
+                // at all, since the Facet itself (the sidebar's own
+                // `render()`) has no idea this exists, nor does it
+                // need to.
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("start-drag") {
+                    start_window_drag(parent_handle.as_raw());
+                    return;
+                }
+                let Some(webview) = cell_for_ipc.get() else { return };
                 let Some(id) = parsed.get("id").and_then(|v| v.as_i64()) else { return };
                 let Some(req) = parsed.get("request").and_then(|v| v.as_str()) else { return };
                 let response = crate::dispatch_facet_request(&bridge, req).unwrap_or_else(|e| e);
