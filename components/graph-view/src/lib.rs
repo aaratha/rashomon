@@ -134,8 +134,12 @@ const PAGE: &str = r#"<!doctype html>
   listBtn.onclick = function () { setMode('list'); };
   diagramBtn.onclick = function () { setMode('diagram'); };
 
-  // Zoom (scroll wheel), pan (drag canvas), and node dragging all come
-  // free from vis-network's defaults — no custom interaction code needed.
+  // Pan (drag canvas) and node dragging come free from vis-network's
+  // defaults. Scroll-wheel zoom (`zoomView`) is disabled here and
+  // reimplemented below instead, alongside trackpad two-finger pan/
+  // pinch — see `networkEl`'s `wheel` listener for why both need to
+  // share one handler rather than letting vis-network's own default
+  // coexist with it.
   const network = new vis.Network(
     document.getElementById('network'),
     { nodes: [], edges: [] },
@@ -148,8 +152,82 @@ const PAGE: &str = r#"<!doctype html>
         smooth: { type: 'continuous' },
       },
       physics: { stabilization: { iterations: 100 } },
-      interaction: { hover: true },
+      interaction: { hover: true, zoomView: false },
     }
+  );
+
+  // Trackpad vs. mouse can't be told apart directly from a `wheel`
+  // event (there's no device-type field on it) — this is the same
+  // heuristic Mapbox GL JS/OpenLayers use: a real mouse wheel's
+  // `wheelDeltaY` is always a multiple of 120 (the historical "one
+  // notch" unit everything still reports in, even on modern high-res
+  // mice); a trackpad's continuous swipe essentially never lands
+  // exactly on a multiple of 120 by chance. WebKit (and so this
+  // WKWebView-hosted page) also sets `ctrlKey` on the synthesized
+  // `wheel` event it generates for an actual pinch gesture — a
+  // separate, unambiguous signal checked first, below.
+  function isTrackpadWheelEvent(e) {
+    return !e.wheelDeltaY || e.wheelDeltaY % 120 !== 0;
+  }
+
+  // `network.moveTo({ scale, position })` treats `position` as the
+  // canvas point that should end up centered in the viewport — *not*
+  // "zoom while keeping this point fixed under the cursor" the way a
+  // real cursor-centered zoom needs. Keeping `pointer` fixed on screen
+  // means the view's center has to move too, by exactly the amount
+  // `pointer` would otherwise have drifted from the zoom alone: at the
+  // old scale `s0` and view center `c0`, `pointer` sits
+  // `(pointer - c0) * s0` screen-pixels from center; solving for the
+  // new center `c1` that keeps that same screen offset at the new
+  // scale `s1` gives `c1 = pointer + (c0 - pointer) * (s0 / s1)`.
+  function zoomAroundPointer(pointer, newScale) {
+    const oldScale = network.getScale();
+    const center = network.getViewPosition();
+    const ratio = oldScale / newScale;
+    network.moveTo({
+      scale: newScale,
+      position: {
+        x: pointer.x + (center.x - pointer.x) * ratio,
+        y: pointer.y + (center.y - pointer.y) * ratio,
+      },
+      animation: false,
+    });
+  }
+
+  const networkEl = document.getElementById('network');
+  networkEl.addEventListener(
+    'wheel',
+    function (e) {
+      e.preventDefault();
+      const rect = networkEl.getBoundingClientRect();
+      const pointer = network.DOMtoCanvas({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+
+      if (e.ctrlKey) {
+        // Trackpad pinch — `e.deltaY` is WebKit's own synthesized
+        // zoom amount for this gesture, negative when pinching open
+        // (zoom in), positive when pinching closed (zoom out).
+        zoomAroundPointer(pointer, network.getScale() * Math.exp(-e.deltaY * 0.01));
+      } else if (isTrackpadWheelEvent(e)) {
+        // Trackpad two-finger pan — moves the view in the same
+        // direction as the swipe (content follows the fingers), the
+        // same "natural scrolling" convention macOS already uses
+        // everywhere else. Divided by the current scale so a swipe
+        // covers the same *screen* distance at any zoom level.
+        const scale = network.getScale();
+        const pos = network.getViewPosition();
+        network.moveTo({
+          position: { x: pos.x + e.deltaX / scale, y: pos.y + e.deltaY / scale },
+          animation: false,
+        });
+      } else {
+        // A real mouse's scroll wheel — unchanged from vis-network's
+        // own previous default `zoomView` behavior: each notch zooms
+        // in/out by a fixed step, centered on the cursor.
+        const direction = e.deltaY < 0 ? 1 : -1;
+        zoomAroundPointer(pointer, network.getScale() * Math.exp(direction * 0.1));
+      }
+    },
+    { passive: false }
   );
 
   function shorten(id) {
