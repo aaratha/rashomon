@@ -91,6 +91,12 @@ pub mod rashomon {
             pub struct ExtensionInfo {
                 pub id: _rt::String,
                 pub name: _rt::String,
+                /// A `data:` URI for the extension's own icon (from its
+                /// `manifest.json`'s `action.default_icon`, falling back to
+                /// the top-level `icons` field), ready to drop straight into
+                /// an `<img src>` — `none` if the manifest had no icon at all,
+                /// or its file couldn't be read.
+                pub icon: Option<_rt::String>,
                 pub popup_open: bool,
             }
             impl ::core::fmt::Debug for ExtensionInfo {
@@ -101,6 +107,7 @@ pub mod rashomon {
                     f.debug_struct("ExtensionInfo")
                         .field("id", &self.id)
                         .field("name", &self.name)
+                        .field("icon", &self.icon)
                         .field("popup-open", &self.popup_open)
                         .finish()
                 }
@@ -239,13 +246,13 @@ pub mod rashomon {
                         let l3 = *ptr0
                             .add(::core::mem::size_of::<*const u8>())
                             .cast::<usize>();
-                        let base11 = l2;
-                        let len11 = l3;
-                        let mut result11 = _rt::Vec::with_capacity(len11);
-                        for i in 0..len11 {
-                            let base = base11
-                                .add(i * (5 * ::core::mem::size_of::<*const u8>()));
-                            let e11 = {
+                        let base15 = l2;
+                        let len15 = l3;
+                        let mut result15 = _rt::Vec::with_capacity(len15);
+                        for i in 0..len15 {
+                            let base = base15
+                                .add(i * (8 * ::core::mem::size_of::<*const u8>()));
+                            let e15 = {
                                 let l4 = *base.add(0).cast::<*mut u8>();
                                 let l5 = *base
                                     .add(::core::mem::size_of::<*const u8>())
@@ -273,21 +280,48 @@ pub mod rashomon {
                                         .add(4 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
+                                let l14 = i32::from(
+                                    *base
+                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>(),
+                                );
                                 ExtensionInfo {
                                     id: _rt::string_lift(bytes6),
                                     name: _rt::string_lift(bytes9),
-                                    popup_open: _rt::bool_lift(l10 as u8),
+                                    icon: match l10 {
+                                        0 => None,
+                                        1 => {
+                                            let e = {
+                                                let l11 = *base
+                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l12 = *base
+                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len13 = l12;
+                                                let bytes13 = _rt::Vec::from_raw_parts(
+                                                    l11.cast(),
+                                                    len13,
+                                                    len13,
+                                                );
+                                                _rt::string_lift(bytes13)
+                                            };
+                                            Some(e)
+                                        }
+                                        _ => _rt::invalid_enum_discriminant(),
+                                    },
+                                    popup_open: _rt::bool_lift(l14 as u8),
                                 }
                             };
-                            result11.push(e11);
+                            result15.push(e15);
                         }
                         _rt::cabi_dealloc(
-                            base11,
-                            len11 * (5 * ::core::mem::size_of::<*const u8>()),
+                            base15,
+                            len15 * (8 * ::core::mem::size_of::<*const u8>()),
                             ::core::mem::size_of::<*const u8>(),
                         );
-                        let result12 = result11;
-                        result12
+                        let result16 = result15;
+                        result16
                     }
                 }
             }
@@ -2322,6 +2356,34 @@ pub mod rashomon {
                     result19
                 }
             }
+            #[allow(unused_unsafe, clippy::all)]
+            /// Deletes a Node and every Edge touching it. Deleting an `entity`
+            /// Node cascades: every `occurrence` Node connected to it via an
+            /// `occurrence-of` Edge is deleted too (an Occurrence has no
+            /// identity of its own apart from the Entity it's an occurrence
+            /// of, so leaving it behind orphaned would be more confusing than
+            /// useful) — deleting an `occurrence` Node directly does not
+            /// cascade back up to its Entity. Returns `false` if `id` didn't
+            /// exist.
+            pub fn delete_node(id: &str) -> bool {
+                unsafe {
+                    let vec0 = id;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
+                    unsafe extern "C" {
+                        #[link_name = "delete-node"]
+                        fn wit_import1(_: *mut u8, _: usize) -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8, _: usize) -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import1(ptr0.cast_mut(), len0) };
+                    _rt::bool_lift(ret as u8)
+                }
+            }
         }
     }
     pub mod process {
@@ -2831,6 +2893,47 @@ pub mod rashomon {
                     result12
                 }
             }
+            #[allow(unused_unsafe, clippy::all)]
+            /// The user's own configured interactive shell for this platform
+            /// (e.g. honors `chsh` on Unix) — a Component that just wants "a
+            /// normal shell" should call this instead of hardcoding `bash` (or
+            /// any other shell) directly, so a terminal Facet matches whatever
+            /// the user has actually set as their default.
+            pub fn default_shell() -> _rt::String {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 2 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 2
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:process/spawner")]
+                    unsafe extern "C" {
+                        #[link_name = "default-shell"]
+                        fn wit_import1(_: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0) };
+                    let l2 = *ptr0.add(0).cast::<*mut u8>();
+                    let l3 = *ptr0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len4 = l3;
+                    let bytes4 = _rt::Vec::from_raw_parts(l2.cast(), len4, len4);
+                    let result5 = _rt::string_lift(bytes4);
+                    result5
+                }
+            }
         }
     }
 }
@@ -3073,6 +3176,17 @@ mod _rt {
             self as f32
         }
     }
+    pub unsafe fn bool_lift(val: u8) -> bool {
+        if cfg!(debug_assertions) {
+            match val {
+                0 => false,
+                1 => true,
+                _ => panic!("invalid bool discriminant"),
+            }
+        } else {
+            val != 0
+        }
+    }
     use core::fmt;
     use core::marker;
     use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -3206,17 +3320,6 @@ mod _rt {
             self as i32
         }
     }
-    pub unsafe fn bool_lift(val: u8) -> bool {
-        if cfg!(debug_assertions) {
-            match val {
-                0 => false,
-                1 => true,
-                _ => panic!("invalid bool discriminant"),
-            }
-        } else {
-            val != 0
-        }
-    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -3259,14 +3362,14 @@ pub(crate) use __export_facet_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2467] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa1\x12\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2524] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xda\x12\x01A\x02\x01\
 A\x15\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
 keys\x05values\x04\0\x08property\x03\0\x02\x01p\x03\x01r\x04\x02ids\x09node-type\
 s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x09edge-\
 types\x06sources\x06targets\x09timestampw\x0aconfidencev\x04\0\x04edge\x03\0\x07\
 \x03\0\x14rashomon:graph/types\x05\0\x02\x03\0\0\x04role\x02\x03\0\0\x04node\x02\
-\x03\0\0\x04edge\x02\x03\0\0\x08property\x01B\x19\x02\x03\x02\x01\x01\x04\0\x04r\
+\x03\0\0\x04edge\x02\x03\0\0\x08property\x01B\x1b\x02\x03\x02\x01\x01\x04\0\x04r\
 ole\x03\0\0\x02\x03\x02\x01\x02\x04\0\x04node\x03\0\x02\x02\x03\x02\x01\x03\x04\0\
 \x04edge\x03\0\x04\x02\x03\x02\x01\x04\x04\0\x08property\x03\0\x06\x01p\x07\x01@\
 \x03\x09node-types\x09node-role\x01\x0aproperties\x08\0\x03\x04\0\x0bcreate-node\
@@ -3274,46 +3377,47 @@ ole\x03\0\0\x02\x03\x02\x01\x02\x04\0\x04node\x03\0\x02\x02\x03\x02\x01\x03\x04\
 ge-types\x06sources\x06targets\x0aconfidencev\0\x05\x04\0\x0bcreate-edge\x01\x0c\
 \x01p\x05\x01@\x01\x07node-ids\0\x0d\x04\0\x10query-edges-from\x01\x0e\x04\0\x0e\
 query-edges-to\x01\x0e\x01p\x03\x01@\0\0\x0f\x04\0\x0alist-nodes\x01\x10\x01@\0\0\
-\x0d\x04\0\x0alist-edges\x01\x11\x03\0\x14rashomon:graph/store\x05\x05\x01B\x10\x04\
-\0\x07process\x03\x01\x01h\0\x01p}\x01j\x01y\x01s\x01@\x02\x04self\x01\x04data\x02\
-\0\x03\x04\0\x15[method]process.write\x01\x04\x01j\x01\x02\x01s\x01@\x02\x04self\
-\x01\x09max-bytesy\0\x05\x04\0\x14[method]process.read\x01\x06\x01j\0\x01s\x01@\x03\
-\x04self\x01\x04colsy\x04rowsy\0\x07\x04\0\x16[method]process.resize\x01\x08\x01\
-@\x02\x04self\x01\x03sigs\0\x07\x04\0\x16[method]process.signal\x01\x09\x01@\x01\
-\x04self\x01\0z\x04\0\x14[method]process.wait\x01\x0a\x03\0\x16rashomon:process/\
-types\x05\x06\x02\x03\0\x02\x07process\x01B\x08\x02\x03\x02\x01\x07\x04\0\x07pro\
-cess\x03\0\0\x01ps\x01ks\x01i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\
-\x02\x03cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x03\0\x18rashomon:process/spawner\x05\
-\x08\x01B,\x04\0\x0fbrowser-context\x03\x01\x01r\x03\x02ids\x04names\x0esource-b\
-rowsers\x04\0\x13extension-candidate\x03\0\x01\x01r\x03\x02ids\x04names\x0apopup\
--open\x7f\x04\0\x0eextension-info\x03\0\x03\x01r\x03\x02ids\x03urls\x05titles\x04\
-\0\x08tab-info\x03\0\x05\x04\0\x0bbrowser-tab\x03\x01\x01h\0\x01@\x01\x04self\x08\
-\0s\x04\0\x1a[method]browser-context.id\x01\x09\x01p\x04\x01@\x01\x04self\x08\0\x0a\
-\x04\0'[method]browser-context.list-extensions\x01\x0b\x01j\0\x01s\x01@\x02\x04s\
-elf\x08\x0cextension-ids\0\x0c\x04\0.[method]browser-context.toggle-extension-po\
-pup\x01\x0d\x01p\x02\x01@\x01\x04self\x08\0\x0e\x04\01[method]browser-context.li\
-st-extension-candidates\x01\x0f\x01@\x02\x04self\x08\x0ccandidate-ids\0\x0c\x04\0\
-%[method]browser-context.add-extension\x01\x10\x04\0([method]browser-context.rem\
-ove-extension\x01\x0d\x01p\x06\x01@\x01\x04self\x08\0\x11\x04\0![method]browser-\
-context.list-tabs\x01\x12\x01@\x02\x04self\x08\x06tab-ids\0\x0c\x04\0%[method]br\
-owser-context.switch-to-tab\x01\x13\x01h\x07\x01@\x01\x04self\x14\0s\x04\0\x16[m\
-ethod]browser-tab.id\x01\x15\x01@\x02\x04self\x14\x03urls\0\x0c\x04\0\x1c[method\
-]browser-tab.navigate\x01\x16\x04\0\x1f[method]browser-tab.current-url\x01\x15\x04\
-\0\x19[method]browser-tab.title\x01\x15\x01@\x01\x04self\x14\x01\0\x04\0\x19[met\
-hod]browser-tab.close\x01\x17\x01j\x01s\x01s\x01@\x01\x04self\x14\0\x18\x04\0\x20\
-[method]browser-tab.snapshot-dom\x01\x19\x01@\x02\x04self\x14\x06scripts\0\x18\x04\
-\0![method]browser-tab.inject-script\x01\x1a\x01@\x02\x04self\x14\x04specs\0\x18\
-\x04\0\x1a[method]browser-tab.anchor\x01\x1b\x03\0\x16rashomon:browser/types\x05\
-\x09\x02\x03\0\x04\x0fbrowser-context\x02\x03\0\x04\x0bbrowser-tab\x01B\x0b\x02\x03\
-\x02\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x0bbrows\
-er-tab\x03\0\x02\x01i\x01\x01@\0\0\x04\x04\0\x0ecreate-context\x01\x05\x01h\x01\x01\
-i\x03\x01@\x02\x07context\x06\x03urls\0\x07\x04\0\x0acreate-tab\x01\x08\x03\0\x18\
-rashomon:browser/control\x05\x0c\x01B\x07\x01@\x01\x07node-ids\0s\x04\0\x06rende\
-r\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0chandle-input\x01\x02\x01@\0\0s\x04\
-\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:facet/contract\x05\x0d\x04\0\x1crash\
-omon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bfacet-world\x03\0\0\0G\x09produc\
-ers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060\
-.41.0";
+\x0d\x04\0\x0alist-edges\x01\x11\x01@\x01\x02ids\0\x7f\x04\0\x0bdelete-node\x01\x12\
+\x03\0\x14rashomon:graph/store\x05\x05\x01B\x10\x04\0\x07process\x03\x01\x01h\0\x01\
+p}\x01j\x01y\x01s\x01@\x02\x04self\x01\x04data\x02\0\x03\x04\0\x15[method]proces\
+s.write\x01\x04\x01j\x01\x02\x01s\x01@\x02\x04self\x01\x09max-bytesy\0\x05\x04\0\
+\x14[method]process.read\x01\x06\x01j\0\x01s\x01@\x03\x04self\x01\x04colsy\x04ro\
+wsy\0\x07\x04\0\x16[method]process.resize\x01\x08\x01@\x02\x04self\x01\x03sigs\0\
+\x07\x04\0\x16[method]process.signal\x01\x09\x01@\x01\x04self\x01\0z\x04\0\x14[m\
+ethod]process.wait\x01\x0a\x03\0\x16rashomon:process/types\x05\x06\x02\x03\0\x02\
+\x07process\x01B\x0a\x02\x03\x02\x01\x07\x04\0\x07process\x03\0\0\x01ps\x01ks\x01\
+i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\x02\x03cwd\x03\0\x05\x04\0\x05\
+spawn\x01\x06\x01@\0\0s\x04\0\x0ddefault-shell\x01\x07\x03\0\x18rashomon:process\
+/spawner\x05\x08\x01B-\x04\0\x0fbrowser-context\x03\x01\x01r\x03\x02ids\x04names\
+\x0esource-browsers\x04\0\x13extension-candidate\x03\0\x01\x01ks\x01r\x04\x02ids\
+\x04names\x04icon\x03\x0apopup-open\x7f\x04\0\x0eextension-info\x03\0\x04\x01r\x03\
+\x02ids\x03urls\x05titles\x04\0\x08tab-info\x03\0\x06\x04\0\x0bbrowser-tab\x03\x01\
+\x01h\0\x01@\x01\x04self\x09\0s\x04\0\x1a[method]browser-context.id\x01\x0a\x01p\
+\x05\x01@\x01\x04self\x09\0\x0b\x04\0'[method]browser-context.list-extensions\x01\
+\x0c\x01j\0\x01s\x01@\x02\x04self\x09\x0cextension-ids\0\x0d\x04\0.[method]brows\
+er-context.toggle-extension-popup\x01\x0e\x01p\x02\x01@\x01\x04self\x09\0\x0f\x04\
+\01[method]browser-context.list-extension-candidates\x01\x10\x01@\x02\x04self\x09\
+\x0ccandidate-ids\0\x0d\x04\0%[method]browser-context.add-extension\x01\x11\x04\0\
+([method]browser-context.remove-extension\x01\x0e\x01p\x07\x01@\x01\x04self\x09\0\
+\x12\x04\0![method]browser-context.list-tabs\x01\x13\x01@\x02\x04self\x09\x06tab\
+-ids\0\x0d\x04\0%[method]browser-context.switch-to-tab\x01\x14\x01h\x08\x01@\x01\
+\x04self\x15\0s\x04\0\x16[method]browser-tab.id\x01\x16\x01@\x02\x04self\x15\x03\
+urls\0\x0d\x04\0\x1c[method]browser-tab.navigate\x01\x17\x04\0\x1f[method]browse\
+r-tab.current-url\x01\x16\x04\0\x19[method]browser-tab.title\x01\x16\x01@\x01\x04\
+self\x15\x01\0\x04\0\x19[method]browser-tab.close\x01\x18\x01j\x01s\x01s\x01@\x01\
+\x04self\x15\0\x19\x04\0\x20[method]browser-tab.snapshot-dom\x01\x1a\x01@\x02\x04\
+self\x15\x06scripts\0\x19\x04\0![method]browser-tab.inject-script\x01\x1b\x01@\x02\
+\x04self\x15\x04specs\0\x19\x04\0\x1a[method]browser-tab.anchor\x01\x1c\x03\0\x16\
+rashomon:browser/types\x05\x09\x02\x03\0\x04\x0fbrowser-context\x02\x03\0\x04\x0b\
+browser-tab\x01B\x0b\x02\x03\x02\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\x03\
+\x02\x01\x0b\x04\0\x0bbrowser-tab\x03\0\x02\x01i\x01\x01@\0\0\x04\x04\0\x0ecreat\
+e-context\x01\x05\x01h\x01\x01i\x03\x01@\x02\x07context\x06\x03urls\0\x07\x04\0\x0a\
+create-tab\x01\x08\x03\0\x18rashomon:browser/control\x05\x0c\x01B\x07\x01@\x01\x07\
+node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0chandle\
+-input\x01\x02\x01@\0\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:facet/co\
+ntract\x05\x0d\x04\0\x1crashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bface\
+t-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.22\
+7.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

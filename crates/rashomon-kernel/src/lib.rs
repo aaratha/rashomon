@@ -613,6 +613,80 @@ fn resolve_i18n_message(raw: &str, version_dir: &Path, default_locale: Option<&s
         .unwrap_or_else(|| raw.to_string())
 }
 
+/// Reads `manifest.json` from `extension_dir` (the same version
+/// directory `BrowserExtensionConfig::path` already points at, for
+/// both discovered and manually-added extensions) and resolves its
+/// icon to a `data:` URI the sidebar can drop straight into an
+/// `<img src>` — not mac-gated like extension *discovery* is, since
+/// nothing here depends on a specific browser's profile layout, just
+/// the extension's own already-resolved directory. Picks whichever
+/// declared size is closest to 48px (a sidebar icon button doesn't
+/// want to upscale a 16px asset or downscale a 128px one) from
+/// `action.default_icon` first, falling back to the top-level `icons`
+/// field (both the same `{size: path}` shape, or occasionally a bare
+/// path string instead of a size map). `None` if the manifest has no
+/// icon field at all, or the file it names can't be read.
+fn load_extension_icon_data_uri(extension_dir: &Path) -> Option<String> {
+    let manifest_text = std::fs::read_to_string(extension_dir.join("manifest.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).ok()?;
+
+    let icon_field = manifest
+        .get("action")
+        .and_then(|a| a.get("default_icon"))
+        .or_else(|| manifest.get("icons"))?;
+
+    let relative_path = match icon_field {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(sizes) => sizes
+            .iter()
+            .min_by_key(|(size, _)| size.parse::<i64>().unwrap_or(48).abs_diff(48))
+            .and_then(|(_, v)| v.as_str())
+            .map(str::to_string)?,
+        _ => return None,
+    };
+
+    let icon_path = extension_dir.join(relative_path);
+    let bytes = std::fs::read(&icon_path).ok()?;
+    let mime = match icon_path.extension().and_then(|e| e.to_str()) {
+        Some("svg") => "image/svg+xml",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        // Most extension icons are PNG (long-standing Chrome Web
+        // Store convention) — defaulted to rather than returning
+        // `None` for an unrecognized extension, since a wrong-but-
+        // plausible guess still renders correctly far more often than
+        // it doesn't.
+        _ => "image/png",
+    };
+    Some(format!("data:{mime};base64,{}", base64_encode_bytes(&bytes)))
+}
+
+/// A plain, hand-rolled base64 encoder (standard alphabet, `=`
+/// padding) — used here specifically *instead of* CEF's own
+/// `base64_encode` utility (the same one `html_data_uri` elsewhere in
+/// this file happily reuses) because this function runs during
+/// extension setup in `run_browser_process`, *before* `initialize()`
+/// is ever called — confirmed empirically to crash CEF's own startup
+/// outright (a `SIGTRAP` inside `cef_initialize` itself, not even in
+/// this function) when a CEF utility function is called that early.
+/// Every other `base64_encode` call site in this codebase runs well
+/// after `initialize()` succeeds, so this is the only one that needs
+/// its own implementation.
+fn base64_encode_bytes(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[(b2 & 0x3f) as usize] as char } else { '=' });
+    }
+    out
+}
+
 #[derive(Serialize, Deserialize)]
 struct ExtensionConfigFile {
     extensions: Vec<BrowserExtensionConfig>,
@@ -677,6 +751,13 @@ enum PopupState {
 struct ExtensionRuntime {
     config: BrowserExtensionConfig,
     popup: Arc<Mutex<PopupState>>,
+    /// Computed once at startup (see [`load_extension_icon_data_uri`])
+    /// rather than read fresh on every `list-extensions` poll — it's
+    /// a handful of KB of base64 that never changes for the lifetime
+    /// of this process, so there's no reason to re-read and re-encode
+    /// it from disk every ~500ms just because the sidebar polls that
+    /// often.
+    icon_data_uri: Option<String>,
 }
 
 wrap_life_span_handler! {
@@ -1277,6 +1358,7 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
             .map(|ext| rashomon::browser::types::ExtensionInfo {
                 id: ext.config.id.clone(),
                 name: ext.config.name.clone(),
+                icon: ext.icon_data_uri.clone(),
                 popup_open: matches!(
                     *ext.popup.lock().expect("popup lock poisoned"),
                     PopupState::Open(..)
@@ -2655,7 +2737,10 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         extension_configs
             .iter()
             .cloned()
-            .map(|config| ExtensionRuntime { config, popup: Arc::new(Mutex::new(PopupState::Closed)) })
+            .map(|config| {
+                let icon_data_uri = load_extension_icon_data_uri(&config.path);
+                ExtensionRuntime { config, popup: Arc::new(Mutex::new(PopupState::Closed)), icon_data_uri }
+            })
             .collect(),
     );
 

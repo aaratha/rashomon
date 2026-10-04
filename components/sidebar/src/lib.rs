@@ -36,20 +36,15 @@ impl Guest for Component {
     }
 
     /// `event` has already had its `<window-id>:` routing prefix
-    /// stripped by the host, same as every other Facet — `toggle-popup`
-    /// and `switch-tab:<id>` are this Component's own tiny protocol,
-    /// not something the host knows the shape of.
+    /// stripped by the host, same as every other Facet —
+    /// `toggle-popup:<extension-id>` and `switch-tab:<id>` are this
+    /// Component's own tiny protocol, not something the host knows
+    /// the shape of.
     fn handle_input(event: String) -> Vec<String> {
         CONTEXT.with_borrow(|ctx| {
             let Some(ctx) = ctx.as_ref() else { return };
-            if event == "toggle-popup" {
-                // Toggles the first configured extension's popup —
-                // there's only ever one configured right now (Bitwarden,
-                // in `rashomon-kernel::run_browser_process`), so "first"
-                // is unambiguous for now.
-                if let Some(ext) = ctx.list_extensions().into_iter().next() {
-                    let _ = ctx.toggle_extension_popup(&ext.id);
-                }
+            if let Some(extension_id) = event.strip_prefix("toggle-popup:") {
+                let _ = ctx.toggle_extension_popup(extension_id);
             } else if let Some(tab_id) = event.strip_prefix("switch-tab:") {
                 let _ = ctx.switch_to_tab(tab_id);
             }
@@ -58,17 +53,31 @@ impl Guest for Component {
     }
 
     /// Polled on a `setInterval`, same as `terminal-xterm`'s live
-    /// output — returns the current tab list as `id\tlabel` lines, no
-    /// incremental diffing needed since `list-tabs` is cheap and the
-    /// page itself only re-renders when the result actually changes.
+    /// output — returns both the extension icon row and the tab list
+    /// as one `\n`-joined feed, each line tagged `EXT`/`TAB` (same
+    /// convention `graph-view`'s `NODE`/`EDGE` poll format uses) since
+    /// there's no other way to carry two differently-shaped lists back
+    /// over one plain-string channel. No incremental diffing needed —
+    /// both `list-extensions`/`list-tabs` are cheap, and the page
+    /// itself only re-renders when the joined result actually changes.
     fn poll_output() -> String {
         CONTEXT.with_borrow(|ctx| {
             let Some(ctx) = ctx.as_ref() else { return String::new() };
-            ctx.list_tabs()
+            let mut lines: Vec<String> = ctx
+                .list_extensions()
                 .into_iter()
-                .map(|tab| format!("{}\t{}", tab.id, tab.title))
-                .collect::<Vec<_>>()
-                .join("\n")
+                .map(|ext| {
+                    format!(
+                        "EXT\t{}\t{}\t{}\t{}",
+                        ext.id,
+                        ext.name,
+                        ext.icon.unwrap_or_default(),
+                        ext.popup_open
+                    )
+                })
+                .collect();
+            lines.extend(ctx.list_tabs().into_iter().map(|tab| format!("TAB\t{}\t{}", tab.id, tab.title)));
+            lines.join("\n")
         })
     }
 }
@@ -97,9 +106,10 @@ const PAGE: &str = r#"<!doctype html>
     padding: 8px 10px;
     border: none;
     border-radius: 6px;
-    /* Translucent rather than solid — matches the sidebar's own glass
-       background instead of sitting on top of it as an opaque block. */
-    background: rgba(255, 255, 255, 0.08);
+    /* Invisible at rest — only `:hover` below gives it any fill, so
+       the sidebar reads as a flat list of labels sitting directly on
+       the glass until you actually point at one. */
+    background: transparent;
     color: #eee;
     cursor: pointer;
     text-align: left;
@@ -118,11 +128,25 @@ const PAGE: &str = r#"<!doctype html>
   }
   button:hover { background: rgba(255, 255, 255, 0.16); }
   #tabs { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  #extensions { display: flex; flex-direction: row; gap: 4px; flex-wrap: wrap; }
+  /* Square icon buttons, not the full-width label rows tabs use —
+     same transparent-until-hover treatment either way (inherited from
+     the plain `button` rule above), just a different shape/padding. */
+  .ext-btn { flex: 0 0 auto; width: 32px; height: 32px; padding: 4px; display: flex; align-items: center; justify-content: center; }
+  .ext-btn img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  /* A placeholder glyph for an extension with no resolvable icon
+     (`ExtensionInfo.icon` was `none`) — still clickable, just with
+     nothing to show but its initial. */
+  .ext-btn .ext-fallback { font-size: 14px; }
+  /* Reflects `popup-open` — a steady highlight, not just the
+     transient `:hover` one, so the icon whose popup is currently open
+     stays visually distinct while you're looking at something else. */
+  .ext-btn.active { background: rgba(255, 255, 255, 0.16); }
 </style>
 </head>
 <body>
 <div id="sidebar">
-  <button id="popup-btn">Open Popup</button>
+  <div id="extensions"></div>
   <div id="tabs"></div>
 </div>
 <script>
@@ -135,10 +159,6 @@ const PAGE: &str = r#"<!doctype html>
       onFailure: function () {},
     });
   }
-
-  document.getElementById('popup-btn').onclick = function () {
-    query('toggle-popup');
-  };
 
   // Lets any non-interactive area of the sidebar (not a button, link,
   // etc.) drag-move the window, the same way clicking a real titlebar
@@ -155,30 +175,55 @@ const PAGE: &str = r#"<!doctype html>
     window.ipc.postMessage(JSON.stringify({ type: 'start-drag' }));
   });
 
-  let lastTabsKey = '';
-  function refreshTabs() {
+  let lastPollKey = '';
+  function refresh() {
     query('__poll__', function (response) {
-      if (response === lastTabsKey) return;
-      lastTabsKey = response;
-      const container = document.getElementById('tabs');
-      container.innerHTML = '';
+      if (response === lastPollKey) return;
+      lastPollKey = response;
+
+      const extensionsContainer = document.getElementById('extensions');
+      const tabsContainer = document.getElementById('tabs');
+      extensionsContainer.innerHTML = '';
+      tabsContainer.innerHTML = '';
+
       (response || '').split('\n').filter(Boolean).forEach(function (line) {
         const parts = line.split('\t');
-        const id = parts[0];
-        const label = parts[1] || id;
-        const btn = document.createElement('button');
-        btn.textContent = label;
-        btn.title = label;
-        btn.onclick = function () {
-          query('switch-tab:' + id);
-        };
-        container.appendChild(btn);
+        if (parts[0] === 'EXT') {
+          const [, id, name, icon, popupOpen] = parts;
+          const btn = document.createElement('button');
+          btn.className = 'ext-btn' + (popupOpen === 'true' ? ' active' : '');
+          btn.title = name;
+          if (icon) {
+            const img = document.createElement('img');
+            img.src = icon;
+            img.alt = name;
+            btn.appendChild(img);
+          } else {
+            const fallback = document.createElement('span');
+            fallback.className = 'ext-fallback';
+            fallback.textContent = (name || '?').charAt(0).toUpperCase();
+            btn.appendChild(fallback);
+          }
+          btn.onclick = function () {
+            query('toggle-popup:' + id);
+          };
+          extensionsContainer.appendChild(btn);
+        } else if (parts[0] === 'TAB') {
+          const [, id, label] = parts;
+          const btn = document.createElement('button');
+          btn.textContent = label || id;
+          btn.title = label || id;
+          btn.onclick = function () {
+            query('switch-tab:' + id);
+          };
+          tabsContainer.appendChild(btn);
+        }
       });
     });
   }
 
-  setInterval(refreshTabs, 500);
-  refreshTabs();
+  setInterval(refresh, 500);
+  refresh();
 </script>
 </body>
 </html>"#;

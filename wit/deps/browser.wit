@@ -100,6 +100,12 @@ interface types {
     record extension-info {
         id: string,
         name: string,
+        /// A `data:` URI for the extension's own icon (from its
+        /// `manifest.json`'s `action.default_icon`, falling back to
+        /// the top-level `icons` field), ready to drop straight into
+        /// an `<img src>` — `none` if the manifest had no icon at all,
+        /// or its file couldn't be read.
+        icon: option<string>,
         popup-open: bool,
     }
 
