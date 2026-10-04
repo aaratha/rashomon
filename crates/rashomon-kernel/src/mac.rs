@@ -391,6 +391,12 @@ impl UrlBarWebView {
         }
     }
 
+    pub(crate) fn set_bounds(&self, bounds: wry::Rect) {
+        if let Err(e) = self.webview.set_bounds(bounds) {
+            eprintln!("UrlBarWebView::set_bounds failed: {e}");
+        }
+    }
+
     pub(crate) fn set_text(&self, text: &str) {
         let encoded = serde_json::to_string(text).unwrap_or_default();
         let _ = self

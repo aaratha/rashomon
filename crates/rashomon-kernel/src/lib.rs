@@ -65,6 +65,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use cef::wrapper::message_router::*;
@@ -776,6 +777,14 @@ struct BrowserSwitcherState {
     /// other platform, where `wry`/the background blur aren't wired up
     /// yet — see the module doc comment's "macOS-only for now" scoping.
     sidebar_widget: Option<TabWidget>,
+    /// The window's current logical size — starts at
+    /// `WINDOW_WIDTH_PX`/`WINDOW_HEIGHT_PX` (what it's actually
+    /// created at) and kept live-updated on every
+    /// `WindowEvent::Resized` (see [`WinitKernelApp::window_event`]),
+    /// so every rect method below reflects the window's real current
+    /// size instead of baking in its size at creation time.
+    window_width: i32,
+    window_height: i32,
 }
 
 // `native_parent` is a raw `cef_window_handle_t` (`*mut c_void` on
@@ -822,7 +831,7 @@ impl BrowserSwitcherState {
     fn layout_active(&mut self) {
         let Some(tab) = self.tabs.get(self.active_index) else { return };
         let show_urlbar = tab.kind == TabKind::Browser;
-        let rect = if show_urlbar { content_rect_below_urlbar() } else { content_rect_full() };
+        let rect = if show_urlbar { self.content_rect_below_urlbar() } else { self.content_rect_full() };
         show_widget_at(&tab.widget, rect);
 
         #[cfg(target_os = "macos")]
@@ -834,6 +843,44 @@ impl BrowserSwitcherState {
                 }
             }
         }
+    }
+
+    fn sidebar_rect(&self) -> Rect {
+        sidebar_rect(self.window_width, self.window_height)
+    }
+
+    fn urlbar_rect(&self) -> Rect {
+        urlbar_rect(self.window_width)
+    }
+
+    fn content_rect_full(&self) -> Rect {
+        content_rect_full(self.window_width, self.window_height)
+    }
+
+    fn content_rect_below_urlbar(&self) -> Rect {
+        content_rect_below_urlbar(self.window_width, self.window_height)
+    }
+
+    /// Called from [`WinitKernelApp::window_event`] on every
+    /// `WindowEvent::Resized` — updates the live window size the rect
+    /// methods above compute from, then repositions everything that
+    /// isn't already repositioned some other way: the sidebar and
+    /// urlbar (fixed slots, not part of the switchable tab list) and
+    /// whichever tab is currently active (every other tab is hidden,
+    /// and gets its bounds brought up to date for free the next time
+    /// it's switched to — see `layout_active`).
+    fn resize_window(&mut self, width: i32, height: i32) {
+        self.window_width = width;
+        self.window_height = height;
+
+        #[cfg(target_os = "macos")]
+        self.urlbar.set_bounds(cef_rect_to_wry(self.urlbar_rect()));
+
+        if let Some(sidebar) = &self.sidebar_widget {
+            show_widget_at(sidebar, self.sidebar_rect());
+        }
+
+        self.layout_active();
     }
 
     /// Navigates whichever tab is currently active — only meaningful
@@ -1004,10 +1051,13 @@ fn looks_like_url(input: &str) -> bool {
     host_part.contains('.') && !host_part.starts_with('.') && !host_part.ends_with('.')
 }
 
-/// The one native window's fixed size — no live resize handling yet
-/// (see `WinitKernelApp::resumed`'s `with_resizable(false)`), so every
-/// rect below is computed from these constants rather than tracked
-/// against the window's actual current size.
+/// The one native window's size at creation — `WinitKernelApp::resumed`
+/// still opens it at exactly this size, but (unlike before) the window
+/// is resizable and every rect function below takes the *current*
+/// width/height as parameters rather than closing over these directly,
+/// so resizing the real window actually relayouts everything instead
+/// of just leaving stale bounds from whatever size it started at — see
+/// `BrowserSwitcherState::resize_window`.
 const WINDOW_WIDTH_PX: i32 = 1280;
 const WINDOW_HEIGHT_PX: i32 = 800;
 /// Width of the sidebar region on the left — the rest of the window is
@@ -1017,24 +1067,24 @@ const SIDEBAR_WIDTH_PX: i32 = 225;
 /// region only while a `TabKind::Browser` tab is active.
 const URLBAR_HEIGHT_PX: i32 = 36;
 
-fn sidebar_rect() -> Rect {
-    Rect { x: 0, y: 0, width: SIDEBAR_WIDTH_PX, height: WINDOW_HEIGHT_PX }
+fn sidebar_rect(_window_width: i32, window_height: i32) -> Rect {
+    Rect { x: 0, y: 0, width: SIDEBAR_WIDTH_PX, height: window_height }
 }
 
-fn urlbar_rect() -> Rect {
-    Rect { x: SIDEBAR_WIDTH_PX, y: 0, width: WINDOW_WIDTH_PX - SIDEBAR_WIDTH_PX, height: URLBAR_HEIGHT_PX }
+fn urlbar_rect(window_width: i32) -> Rect {
+    Rect { x: SIDEBAR_WIDTH_PX, y: 0, width: window_width - SIDEBAR_WIDTH_PX, height: URLBAR_HEIGHT_PX }
 }
 
-fn content_rect_full() -> Rect {
-    Rect { x: SIDEBAR_WIDTH_PX, y: 0, width: WINDOW_WIDTH_PX - SIDEBAR_WIDTH_PX, height: WINDOW_HEIGHT_PX }
+fn content_rect_full(window_width: i32, window_height: i32) -> Rect {
+    Rect { x: SIDEBAR_WIDTH_PX, y: 0, width: window_width - SIDEBAR_WIDTH_PX, height: window_height }
 }
 
-fn content_rect_below_urlbar() -> Rect {
+fn content_rect_below_urlbar(window_width: i32, window_height: i32) -> Rect {
     Rect {
         x: SIDEBAR_WIDTH_PX,
         y: URLBAR_HEIGHT_PX,
-        width: WINDOW_WIDTH_PX - SIDEBAR_WIDTH_PX,
-        height: WINDOW_HEIGHT_PX - URLBAR_HEIGHT_PX,
+        width: window_width - SIDEBAR_WIDTH_PX,
+        height: window_height - URLBAR_HEIGHT_PX,
     }
 }
 
@@ -1295,14 +1345,14 @@ impl rashomon::browser::control::Host for KernelState {
     fn create_tab(&mut self, _context: Resource<BrowserContext>, url: String) -> Resource<BrowserTab> {
         let title = Arc::new(Mutex::new(String::new()));
         let mut client = TabClient::new(title.clone());
-        let native_parent = self
+        let native_parent_and_rect = self
             .browser_switcher
             .lock()
             .expect("browser switcher lock poisoned")
             .as_ref()
-            .map(|s| s.native_parent);
-        let window_info = native_parent
-            .map(|parent| WindowInfo::default().set_as_child(parent, &content_rect_below_urlbar()))
+            .map(|s| (s.native_parent, s.content_rect_below_urlbar()));
+        let window_info = native_parent_and_rect
+            .map(|(parent, rect)| WindowInfo::default().set_as_child(parent, &rect))
             .unwrap_or_default();
         let settings = BrowserSettings::default();
         let cef_url = CefString::from(url.as_str());
@@ -1661,16 +1711,32 @@ impl Kernel {
     /// `terminal-xterm`) as every other tab mirroring this View; output
     /// is fanned out to all of them via `pending` (see [`ViewHandle`]).
     fn open_window(&self, view_id: &str) -> Result<String> {
-        let (window_id, widget, title) = self.create_facet_widget(view_id, content_rect_full())?;
+        let rect = self
+            .browser_switcher
+            .lock()
+            .expect("browser switcher lock poisoned")
+            .as_ref()
+            .map(|s| s.content_rect_full())
+            .unwrap_or_else(|| content_rect_full(WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX));
+        let (window_id, widget, title) = self.create_facet_widget(view_id, rect)?;
         mount_tab(window_id.clone(), &self.browser_switcher, widget, title, TabKind::FacetView);
         Ok(window_id)
     }
 
     /// Mounts View `view_id` as the sidebar — not a switchable tab, so
     /// it doesn't go through [`mount_tab`] at all, just sits at
-    /// [`sidebar_rect`] for the lifetime of the window.
+    /// [`BrowserSwitcherState::sidebar_rect`] for the lifetime of the
+    /// window (kept up to date on resize — see
+    /// [`BrowserSwitcherState::resize_window`]).
     fn open_sidebar_view(&self, view_id: &str) -> Result<String> {
-        let (window_id, widget, _title) = self.create_facet_widget(view_id, sidebar_rect())?;
+        let rect = self
+            .browser_switcher
+            .lock()
+            .expect("browser switcher lock poisoned")
+            .as_ref()
+            .map(|s| s.sidebar_rect())
+            .unwrap_or_else(|| sidebar_rect(WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX));
+        let (window_id, widget, _title) = self.create_facet_widget(view_id, rect)?;
 
         let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
         let switcher = guard.as_mut().ok_or_else(|| anyhow!("no browser switcher window yet"))?;
@@ -1903,21 +1969,63 @@ wrap_life_span_handler! {
     }
 }
 
+/// The next time [`WinitKernelApp::about_to_wait`] should call
+/// `do_message_loop_work()` — written by
+/// `KernelBrowserProcessHandler::on_schedule_message_pump_work`
+/// (CEF's documented hook for exactly this, under
+/// `external_message_pump`), which can fire on any CEF thread, not
+/// just `winit`'s — hence the `Mutex`, same reasoning as every other
+/// cross-thread handoff in this module. Each call *replaces* whatever
+/// was scheduled before, matching CEF's own contract for this
+/// callback (it's the latest request that's authoritative, not an
+/// additional one to merge in).
+static NEXT_PUMP_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Wakes `winit`'s event loop up from `ControlFlow::Wait`/`WaitUntil`
+/// when `on_schedule_message_pump_work` schedules work sooner than
+/// whatever `about_to_wait` was last told to sleep until — set once,
+/// from `run_browser_process`, right after the `EventLoop` is created.
+static PUMP_PROXY: std::sync::OnceLock<winit::event_loop::EventLoopProxy<()>> = std::sync::OnceLock::new();
+
+/// Upper bound on how long [`WinitKernelApp::about_to_wait`] ever
+/// sleeps before pumping CEF again, regardless of whether
+/// `on_schedule_message_pump_work` asked for anything sooner — a
+/// guaranteed floor, not the primary scheduling signal (that's still
+/// `NEXT_PUMP_DEADLINE`, which wins whenever it's sooner). Comfortably
+/// sub-frame (60fps ≈ 16.7ms) so the browser compositor is never
+/// starved for noticeably long, while still nowhere near as hot as
+/// pumping on literally every `ControlFlow::Poll` tick (which could
+/// run at any multiple of that rate the OS allows).
+const PUMP_FALLBACK_INTERVAL: Duration = Duration::from_millis(16);
+
 // `winit` drives the blocking run loop now (see `WinitKernelApp`), so
-// CEF is configured with `external_message_pump: 1` and this handler's
-// only remaining job is to *not* schedule anything — `about_to_wait`
-// unconditionally pumps CEF on every tick instead of precisely
-// respecting `delay_ms`, which is simpler and fine for a single-window
-// desktop app. Window/tab/sidebar setup (previously done here, in
-// `on_context_initialized`, since that used to be the earliest hook
-// with a CEF context ready) has moved to `WinitKernelApp::resumed`,
-// since it needs the native window `winit` creates, which doesn't
-// exist yet by the time `on_context_initialized` fires.
+// CEF is configured with `external_message_pump: 1` — this handler's
+// job is purely to record *when* CEF next wants `do_message_loop_work()`
+// called again (see `NEXT_PUMP_DEADLINE`) and make sure `winit`'s loop
+// is actually awake to notice, rather than `about_to_wait` pumping
+// unconditionally on every tick under `ControlFlow::Poll` the way it
+// used to — that kept CEF correctly fed, but also pinned a full CPU
+// core busy-looping even with the app sitting completely idle. Window/
+// tab/sidebar setup (previously done here, in `on_context_initialized`,
+// since that used to be the earliest hook with a CEF context ready)
+// has moved to `WinitKernelApp::resumed`, since it needs the native
+// window `winit` creates, which doesn't exist yet by the time
+// `on_context_initialized` fires.
 wrap_browser_process_handler! {
     struct KernelBrowserProcessHandler {}
 
     impl BrowserProcessHandler {
-        fn on_schedule_message_pump_work(&self, _delay_ms: i64) {}
+        fn on_schedule_message_pump_work(&self, delay_ms: i64) {
+            let deadline = Instant::now() + Duration::from_millis(delay_ms.max(0) as u64);
+            *NEXT_PUMP_DEADLINE.lock().expect("pump deadline lock poisoned") = Some(deadline);
+            if let Some(proxy) = PUMP_PROXY.get() {
+                // Only actually needed when the loop is currently
+                // asleep past this new, sooner deadline — but harmless
+                // (just one extra wake-and-recompute) to send
+                // unconditionally rather than tracking that.
+                let _ = proxy.send_event(());
+            }
+        }
     }
 }
 
@@ -2041,6 +2149,22 @@ impl WinitKernelApp {
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
         mac::apply_background_blur(handle.ns_view.as_ptr().cast(), 40);
     }
+
+    /// Relayouts the sidebar/urlbar/active tab against `size` — see
+    /// [`BrowserSwitcherState::resize_window`]. `size` is converted to
+    /// logical units (the same ones `WINDOW_WIDTH_PX`/`WINDOW_HEIGHT_PX`
+    /// and every native frame/`Rect` in this module are already in)
+    /// before use, since `WindowEvent::Resized` itself reports physical
+    /// pixels — on a Retina/HiDPI display those differ from logical
+    /// units by the window's scale factor.
+    fn resize_switcher(&self, size: winit::dpi::PhysicalSize<u32>) {
+        let Some(window) = &self.window else { return };
+        let logical: winit::dpi::LogicalSize<f64> = size.to_logical(window.scale_factor());
+        let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
+        if let Some(switcher) = guard.as_mut() {
+            switcher.resize_window(logical.width.round() as i32, logical.height.round() as i32);
+        }
+    }
 }
 
 impl ApplicationHandler for WinitKernelApp {
@@ -2060,14 +2184,10 @@ impl ApplicationHandler for WinitKernelApp {
         let mut attrs = Window::default_attributes()
             .with_title("Rashomon")
             .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH_PX as f64, WINDOW_HEIGHT_PX as f64))
-            // Resizable even though there's no live-resize layout
-            // handling yet (see the rect helpers' doc comment — tabs/
-            // sidebar/urlbar keep their original fixed bounds, which
-            // will look wrong after a resize until that's built) —
-            // disabling resize entirely was a bigger cost than that
-            // cosmetic gap, since it also silently disabled *moving*
-            // the window edge-to-edge for testing things like
-            // `reapply_background_blur`.
+            // Resizable — `WindowEvent::Resized` (see `window_event`)
+            // keeps the sidebar/urlbar/active tab's bounds in sync
+            // with the window's actual current size (see
+            // `BrowserSwitcherState::resize_window`).
             // `winit` windows are opaque by default — needed in
             // addition to `wry`'s own per-webview transparency so the
             // background blur is actually visible anywhere a
@@ -2109,7 +2229,7 @@ impl ApplicationHandler for WinitKernelApp {
         #[cfg(target_os = "macos")]
         let urlbar = {
             let browser_switcher = self.browser_switcher.clone();
-            mac::UrlBarWebView::new(&native_window_handle, cef_rect_to_wry(urlbar_rect()), move |text| {
+            mac::UrlBarWebView::new(&native_window_handle, cef_rect_to_wry(urlbar_rect(WINDOW_WIDTH_PX)), move |text| {
                 let url = normalize_url_input(&text);
                 if let Some(switcher) = browser_switcher.lock().expect("browser switcher lock poisoned").as_ref() {
                     switcher.navigate_active(&url);
@@ -2127,6 +2247,8 @@ impl ApplicationHandler for WinitKernelApp {
             tabs: Vec::new(),
             active_index: 0,
             sidebar_widget: None,
+            window_width: WINDOW_WIDTH_PX,
+            window_height: WINDOW_HEIGHT_PX,
         });
 
         let router = BROWSER_ROUTER.get_or_init(|| BrowserSideRouter::new(message_router_config()));
@@ -2176,33 +2298,59 @@ impl ApplicationHandler for WinitKernelApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        // The private CGS blur call needs reapplying after the window
+        // server's own compositing state for this window changes —
+        // confirmed empirically: it's visible right after creation,
+        // then silently drops out the next time the window is
+        // resized, moved, or regains key status (e.g. after clicking
+        // back into it from another app). Simplest fix found was to
+        // just reapply it on exactly those `winit` events, rather than
+        // depend on a single call at startup surviving every future
+        // compositing change.
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            // The private CGS blur call needs reapplying after the
-            // window server's own compositing state for this window
-            // changes — confirmed empirically: it's visible right after
-            // creation, then silently drops out the next time the
-            // window is resized, moved, or regains key status (e.g.
-            // after clicking back into it from another app). Simplest
-            // fix found was to just reapply it on exactly those
-            // `winit` events, rather than depend on a single call at
-            // startup surviving every future compositing change.
+            WindowEvent::Resized(size) => {
+                self.resize_switcher(size);
+                #[cfg(target_os = "macos")]
+                self.reapply_background_blur();
+            }
             #[cfg(target_os = "macos")]
-            WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::Focused(true) => {
+            WindowEvent::Moved(_) | WindowEvent::Focused(true) => {
                 self.reapply_background_blur();
             }
             _ => {}
         }
     }
 
-    /// Runs on every tick of `winit`'s own loop (`ControlFlow::Poll`
-    /// below keeps it ticking continuously) — pumping unconditionally
-    /// here is simpler than precisely respecting
-    /// `KernelBrowserProcessHandler::on_schedule_message_pump_work`'s
-    /// `delay_ms`, and fine for a single-window desktop app.
+    /// `external_message_pump` means CEF never gets a blocking run
+    /// loop of its own — it instead calls back into
+    /// `KernelBrowserProcessHandler::on_schedule_message_pump_work`
+    /// (from *any* thread) whenever it wants `do_message_loop_work()`
+    /// called again, recording that request in `NEXT_PUMP_DEADLINE`
+    /// and waking this loop via `PUMP_PROXY` if it's currently asleep.
+    ///
+    /// Pumps unconditionally on *every* wakeup (not just when
+    /// `NEXT_PUMP_DEADLINE` says it's due) — purely relying on that
+    /// callback regressed to every browser rendering solid white,
+    /// confirmed empirically: there's no prior evidence in this
+    /// project that CEF calls it densely enough on its own to keep a
+    /// real compositor fed (the validated `cef-winit-spike` this
+    /// architecture is ported from never actually depended on it
+    /// either — it only ever pumped unconditionally under
+    /// `ControlFlow::Poll`). `NEXT_PUMP_DEADLINE`/`PUMP_PROXY` are kept
+    /// as a *responsiveness* optimization — waking early for input
+    /// CEF flagged as urgent — layered on top of a guaranteed
+    /// `PUMP_FALLBACK_INTERVAL` floor, not as the sole trigger.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         do_message_loop_work();
-        event_loop.set_control_flow(ControlFlow::Poll);
+        let now = Instant::now();
+        let requested = NEXT_PUMP_DEADLINE.lock().expect("pump deadline lock poisoned").take();
+        let fallback = now + PUMP_FALLBACK_INTERVAL;
+        let next_wake = match requested {
+            Some(when) => when.min(fallback),
+            None => fallback,
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
 }
 
@@ -2452,7 +2600,12 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     let _delegate = mac::setup_kernel_app_delegate();
 
     let event_loop = EventLoop::new().context("winit EventLoop::new failed")?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // Lets `KernelBrowserProcessHandler::on_schedule_message_pump_work`
+    // (called from any CEF thread) wake this loop up on demand instead
+    // of it having to busy-poll to notice new scheduled work — see
+    // `NEXT_PUMP_DEADLINE`/`about_to_wait`.
+    let _ = PUMP_PROXY.set(event_loop.create_proxy());
+    event_loop.set_control_flow(ControlFlow::Wait);
     let mut winit_app = WinitKernelApp {
         kernel,
         initial_views,
