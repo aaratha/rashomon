@@ -137,6 +137,7 @@ fn render_page(initial_output: &str) -> String {
         r#"<!doctype html>
 <html>
 <head>
+<title>Terminal</title>
 <meta charset="utf-8" />
 <style>{xterm_css}</style>
 <style>html, body {{ margin: 0; background: #202830; }}</style>

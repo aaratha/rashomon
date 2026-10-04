@@ -95,6 +95,7 @@ impl Guest for Component {
 const PAGE: &str = r#"<!doctype html>
 <html>
 <head>
+<title>Extensions</title>
 <meta charset="utf-8" />
 <style>
   html, body { margin: 0; height: 100%; background: #1e1e1e; color: #eee; font-family: -apple-system, sans-serif; }

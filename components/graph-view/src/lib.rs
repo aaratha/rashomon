@@ -71,14 +71,20 @@ impl Guest for Component {
 const PAGE: &str = r#"<!doctype html>
 <html>
 <head>
+<title>Graph View</title>
 <meta charset="utf-8" />
 <script>/*VIS_NETWORK_JS*/</script>
 <style>
   html, body { margin: 0; height: 100%; background: #1e1e1e; color: #eee; font-family: -apple-system, sans-serif; }
   body { display: flex; flex-direction: column; box-sizing: border-box; }
-  #toolbar { display: flex; gap: 6px; padding: 8px 16px; border-bottom: 1px solid #333; flex: 0 0 auto; }
+  #toolbar { display: flex; gap: 6px; padding: 8px 16px; border-bottom: 1px solid #333; flex: 0 0 auto; align-items: center; flex-wrap: wrap; }
   #toolbar button { padding: 6px 12px; border: none; border-radius: 6px; background: #333; color: #eee; cursor: pointer; font-size: 12px; }
   #toolbar button.active { background: #0a84ff; }
+  #filters { display: flex; gap: 14px; margin-left: 16px; flex-wrap: wrap; }
+  .filter-group { display: flex; gap: 10px; align-items: center; font-size: 12px; color: #aaa; }
+  .filter-group .filter-group-label { color: #666; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; }
+  .filter-group label { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .filter-group input { cursor: pointer; }
   #list-view { padding: 16px; box-sizing: border-box; overflow: auto; flex: 1 1 auto; }
   #diagram-view { flex: 1 1 auto; position: relative; }
   #network { position: absolute; inset: 0; }
@@ -96,6 +102,10 @@ const PAGE: &str = r#"<!doctype html>
 <div id="toolbar">
   <button id="list-btn" class="active">List</button>
   <button id="diagram-btn">Diagram</button>
+  <div id="filters">
+    <span class="filter-group"><span class="filter-group-label">Type</span><span id="type-filters"></span></span>
+    <span class="filter-group"><span class="filter-group-label">Role</span><span id="role-filters"></span></span>
+  </div>
 </div>
 <div id="list-view">
   <h2>Nodes</h2>
@@ -153,6 +163,118 @@ const PAGE: &str = r#"<!doctype html>
     return td;
   }
 
+  // Full parsed snapshot from the last poll — kept around (not just
+  // the filtered subset) so toggling a filter checkbox can re-render
+  // immediately without waiting on the next poll round trip.
+  let allNodes = [];
+  let allEdges = [];
+
+  // Which type/role values a user has explicitly unchecked. Absent
+  // from these sets means visible — including types/roles not
+  // discovered yet, so a brand new node type shows up checked by
+  // default rather than hidden until the user notices and opts in.
+  const hiddenTypes = new Set();
+  const hiddenRoles = new Set();
+  // What `buildFilterGroup` last rendered checkboxes for — only
+  // rebuilt (which would otherwise junk the user's mid-click state)
+  // when the actual set of known values changes.
+  let knownTypesKey = '';
+  let knownRolesKey = '';
+
+  function buildFilterGroup(container, values, hidden, onChange) {
+    container.innerHTML = '';
+    values.forEach(function (value) {
+      const labelEl = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = !hidden.has(value);
+      checkbox.onchange = function () {
+        if (checkbox.checked) hidden.delete(value); else hidden.add(value);
+        onChange();
+      };
+      labelEl.appendChild(checkbox);
+      labelEl.appendChild(document.createTextNode(value));
+      container.appendChild(labelEl);
+    });
+  }
+
+  function emptyRow(colSpan, text) {
+    const row = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = colSpan;
+    td.className = 'empty';
+    td.textContent = text;
+    row.appendChild(td);
+    return row;
+  }
+
+  // Re-renders the table + diagram from `allNodes`/`allEdges` filtered
+  // by the current checkbox state — called after every poll and after
+  // every filter checkbox change, so the two stay in sync without
+  // re-fetching anything.
+  function render() {
+    const visibleNodes = allNodes.filter(function (n) {
+      return !hiddenTypes.has(n.nodeType) && !hiddenRoles.has(n.role);
+    });
+    const visibleIds = new Set(visibleNodes.map(function (n) { return n.id; }));
+    // An edge is only shown if both endpoints survived the filter —
+    // an edge dangling to a hidden node would be more confusing than
+    // useful.
+    const visibleEdges = allEdges.filter(function (e) {
+      return visibleIds.has(e.source) && visibleIds.has(e.target);
+    });
+
+    const nodesBody = document.querySelector('#nodes tbody');
+    const edgesBody = document.querySelector('#edges tbody');
+    nodesBody.innerHTML = '';
+    edgesBody.innerHTML = '';
+
+    const visNodes = [];
+    const visEdges = [];
+
+    visibleNodes.forEach(function (n) {
+      const row = document.createElement('tr');
+      row.appendChild(cell(shorten(n.id), n.id));
+      row.appendChild(cell(n.nodeType));
+      const roleCell = cell(n.role);
+      roleCell.className = n.role;
+      row.appendChild(roleCell);
+      row.appendChild(cell(n.properties || ''));
+      nodesBody.appendChild(row);
+
+      visNodes.push({
+        id: n.id,
+        label: n.nodeType + '\n' + shorten(n.id),
+        color: n.role === 'entity' ? '#7ec8ff' : '#ffcf7e',
+        title: n.id,
+      });
+    });
+
+    visibleEdges.forEach(function (e) {
+      const row = document.createElement('tr');
+      row.appendChild(cell(e.edgeType));
+      row.appendChild(cell(shorten(e.source), e.source));
+      row.appendChild(cell(shorten(e.target), e.target));
+      row.appendChild(cell(e.confidence));
+      edgesBody.appendChild(row);
+
+      visEdges.push({ from: e.source, to: e.target, label: e.edgeType });
+    });
+
+    if (visibleNodes.length === 0) {
+      nodesBody.appendChild(emptyRow(4, allNodes.length === 0 ? 'no nodes yet' : 'no nodes match the filter'));
+    }
+    if (visibleEdges.length === 0) {
+      edgesBody.appendChild(emptyRow(4, allEdges.length === 0 ? 'no edges yet' : 'no edges match the filter'));
+    }
+
+    // Replaces the whole dataset rather than diffing, but doesn't
+    // reset zoom/pan (`setData` leaves the current view alone unless
+    // `fit()` is called, which this deliberately never does, so a
+    // user's pan/zoom survives across refreshes and filter changes).
+    network.setData({ nodes: visNodes, edges: visEdges });
+  }
+
   let lastKey = '';
   function refresh() {
     window.cefQuery({
@@ -161,76 +283,35 @@ const PAGE: &str = r#"<!doctype html>
         if (response === lastKey) return;
         lastKey = response;
 
-        const nodesBody = document.querySelector('#nodes tbody');
-        const edgesBody = document.querySelector('#edges tbody');
-        nodesBody.innerHTML = '';
-        edgesBody.innerHTML = '';
-
-        const visNodes = [];
-        const visEdges = [];
-
-        let nodeCount = 0;
-        let edgeCount = 0;
+        const nodes = [];
+        const edges = [];
         (response || '').split('\n').filter(Boolean).forEach(function (line) {
           const parts = line.split('\t');
           if (parts[0] === 'NODE') {
-            nodeCount++;
             const [, id, nodeType, role, properties] = parts;
-            const row = document.createElement('tr');
-            row.appendChild(cell(shorten(id), id));
-            row.appendChild(cell(nodeType));
-            const roleCell = cell(role);
-            roleCell.className = role;
-            row.appendChild(roleCell);
-            row.appendChild(cell(properties || ''));
-            nodesBody.appendChild(row);
-
-            visNodes.push({
-              id: id,
-              label: nodeType + '\n' + shorten(id),
-              color: role === 'entity' ? '#7ec8ff' : '#ffcf7e',
-              title: id,
-            });
+            nodes.push({ id: id, nodeType: nodeType, role: role, properties: properties || '' });
           } else if (parts[0] === 'EDGE') {
-            edgeCount++;
             const [, , edgeType, source, target, confidence] = parts;
-            const row = document.createElement('tr');
-            row.appendChild(cell(edgeType));
-            row.appendChild(cell(shorten(source), source));
-            row.appendChild(cell(shorten(target), target));
-            row.appendChild(cell(confidence));
-            edgesBody.appendChild(row);
-
-            visEdges.push({ from: source, to: target, label: edgeType });
+            edges.push({ edgeType: edgeType, source: source, target: target, confidence: confidence });
           }
         });
+        allNodes = nodes;
+        allEdges = edges;
 
-        if (nodeCount === 0) {
-          const row = document.createElement('tr');
-          const td = document.createElement('td');
-          td.colSpan = 4;
-          td.className = 'empty';
-          td.textContent = 'no nodes yet';
-          row.appendChild(td);
-          nodesBody.appendChild(row);
+        const types = Array.from(new Set(nodes.map(function (n) { return n.nodeType; }))).sort();
+        const roles = Array.from(new Set(nodes.map(function (n) { return n.role; }))).sort();
+        const typesKey = types.join(',');
+        const rolesKey = roles.join(',');
+        if (typesKey !== knownTypesKey) {
+          knownTypesKey = typesKey;
+          buildFilterGroup(document.getElementById('type-filters'), types, hiddenTypes, render);
         }
-        if (edgeCount === 0) {
-          const row = document.createElement('tr');
-          const td = document.createElement('td');
-          td.colSpan = 4;
-          td.className = 'empty';
-          td.textContent = 'no edges yet';
-          row.appendChild(td);
-          edgesBody.appendChild(row);
+        if (rolesKey !== knownRolesKey) {
+          knownRolesKey = rolesKey;
+          buildFilterGroup(document.getElementById('role-filters'), roles, hiddenRoles, render);
         }
 
-        // Replaces the whole dataset rather than diffing — only runs
-        // when `poll-output` actually changed (guarded by `lastKey`
-        // above), and doesn't reset zoom/pan (`setData` leaves the
-        // current view alone unless `fit()` is called, which this
-        // deliberately never does, so a user's pan/zoom survives
-        // across refreshes).
-        network.setData({ nodes: visNodes, edges: visEdges });
+        render();
       },
       onFailure: function () {},
     });

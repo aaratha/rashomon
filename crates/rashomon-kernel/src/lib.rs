@@ -697,16 +697,44 @@ pub struct BrowserTab {
 /// horizontal split *after* [`open_browser_switcher_window`] returns,
 /// once the "sidebar" Facet has actually been instantiated and
 /// rendered.
+/// Whether a switcher tab is a real website (`create_tab`, where an
+/// address bar makes sense) or a Facet View (`Kernel::open_window` —
+/// terminal/graph-view/extensions, where it doesn't: there's no URL a
+/// user should be navigating, just `data:` HTML the host generated).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabKind {
+    Browser,
+    FacetView,
+}
+
 struct BrowserSwitcherState {
     root_panel: Panel,
     root_layout: Option<BoxLayout>,
+    /// The sidebar's sibling in `root_panel`'s horizontal split — holds
+    /// `urlbar`/`active_region` stacked vertically, so the sidebar-vs-
+    /// content flex logic in [`Kernel::open_sidebar_view`] only has to
+    /// reason about one opaque right-hand-side child, not know this
+    /// vertical split exists at all.
+    content_panel: Panel,
+    /// Address bar for whichever tab is currently active — a native
+    /// `Textfield`, not a Facet (unlike the sidebar), since this is
+    /// host browser-chrome rather than user-authorable UI, and because
+    /// native Views widgets (unlike `BrowserView`) correctly honor a
+    /// `flex: 0` preferred-size row in `content_panel`'s `BoxLayout`.
+    urlbar: Textfield,
     active_region: Panel,
-    /// `(tab-id, view)` — `tab-id` is whatever `create_tab`/`open_window`
-    /// already generates (a `BrowserTab`'s own id, or a Facet View's
-    /// window id), exposed to guests via `list-tabs`/`switch-to-tab` so
-    /// a sidebar Facet can address a tab without ever holding (or being
-    /// handed) its `browser-tab` resource.
-    tabs: Vec<(String, BrowserView)>,
+    /// `(tab-id, view, title)` — `tab-id` is whatever `create_tab`/
+    /// `open_window` already generates (a `BrowserTab`'s own id, or a
+    /// Facet View's window id), exposed to guests via
+    /// `list-tabs`/`switch-to-tab` so a sidebar Facet can address a tab
+    /// without ever holding (or being handed) its `browser-tab`
+    /// resource. `title` is the same `Arc<Mutex<String>>` a
+    /// `DisplayHandler` (`TabDisplayHandler`, shared by `TabClient` and
+    /// `ViewClient`) keeps live-updated from the page's real
+    /// `document.title` — so a browser tab's entry here and the
+    /// `BrowserTab` resource `create_tab` hands back track the exact
+    /// same title, not two independently-drifting copies.
+    tabs: Vec<(String, BrowserView, Arc<Mutex<String>>, TabKind)>,
     active_index: usize,
 }
 
@@ -715,22 +743,44 @@ impl BrowserSwitcherState {
         if index == self.active_index || index >= self.tabs.len() {
             return;
         }
-        let mut current = View::from(&self.tabs[self.active_index].1);
-        self.active_region.remove_child_view(Some(&mut current));
-        let mut next = View::from(&self.tabs[index].1);
-        self.active_region.add_child_view(Some(&mut next));
+        // Toggles visibility rather than adding/removing children —
+        // every tab's `BrowserView` is already mounted (see
+        // `mount_tab_in_switcher`'s doc comment for why: an unmounted
+        // `BrowserView` never actually starts its renderer, so title
+        // tracking never fires for a tab the user hasn't switched to
+        // at least once).
+        View::from(&self.tabs[self.active_index].1).set_visible(0);
+        View::from(&self.tabs[index].1).set_visible(1);
         self.active_region.layout();
         self.active_index = index;
+        self.sync_urlbar();
     }
 
     fn switch_to_id(&mut self, tab_id: &str) -> Result<(), String> {
         let index = self
             .tabs
             .iter()
-            .position(|(id, _)| id == tab_id)
+            .position(|(id, _, _, _)| id == tab_id)
             .ok_or_else(|| format!("no such tab: {tab_id}"))?;
         self.switch_to(index);
         Ok(())
+    }
+
+    /// Shows the address bar (with the active tab's current URL) only
+    /// for `TabKind::Browser` tabs, hiding it entirely for Facet
+    /// Views — called whenever the active tab changes, and once right
+    /// after the very first tab mounts.
+    fn sync_urlbar(&self) {
+        let Some((_, view, _, kind)) = self.tabs.get(self.active_index) else { return };
+        let urlbar_view = View::from(&self.urlbar);
+        match kind {
+            TabKind::Browser => {
+                urlbar_view.set_visible(1);
+                self.urlbar.set_text(Some(&CefString::from(browser_view_url(view).as_str())));
+            }
+            TabKind::FacetView => urlbar_view.set_visible(0),
+        }
+        self.content_panel.layout();
     }
 }
 
@@ -753,18 +803,29 @@ wrap_task! {
 }
 
 /// Registers `browser_view` as a new tab in the shared switcher under
-/// `tab_id`, mounting it into the active region immediately if it's
-/// the very first tab (so the switcher never starts out blank). The
+/// `tab_id`, mounting it into the active region immediately — every
+/// tab, not just the first, is added as a child right away (hidden via
+/// `set_visible(0)` unless it's the very first tab); only one is ever
+/// visible at a time, toggled by [`BrowserSwitcherState::switch_to`]
+/// rather than by adding/removing children. A `BrowserView` that's
+/// never been attached to a shown widget hierarchy never actually
+/// starts its renderer — confirmed by observing that a tab's title
+/// (and any navigation it does) only ever updates once the user has
+/// switched to it at least once; mounting-but-hiding fixes that while
+/// still only ever painting the one tab that's actually visible. The
 /// sidebar Facet discovers new tabs itself by polling `list-tabs`,
 /// rather than being told about each one as it's created. Shared by
 /// `create_tab` (the `rashomon:browser` Host) and `Kernel::open_window`
 /// (Facet Views) — both just hand this whichever `BrowserView` they
-/// created, so a terminal session and a browser tab become
-/// indistinguishable sidebar entries.
+/// created (plus the title `Arc` their own `Client`'s `DisplayHandler`
+/// keeps updated), so a terminal session and a browser tab become
+/// indistinguishable sidebar entries, titles included.
 fn mount_tab_in_switcher(
     tab_id: String,
     browser_switcher: &Arc<Mutex<Option<BrowserSwitcherState>>>,
     browser_view: BrowserView,
+    title: Arc<Mutex<String>>,
+    kind: TabKind,
 ) {
     let mut guard = browser_switcher.lock().expect("browser switcher lock poisoned");
     let Some(switcher) = guard.as_mut() else {
@@ -773,14 +834,66 @@ fn mount_tab_in_switcher(
     };
 
     let index = switcher.tabs.len();
-    switcher.tabs.push((tab_id, browser_view.clone()));
+    switcher.tabs.push((tab_id, browser_view.clone(), title, kind));
 
+    let mut view = View::from(&browser_view);
+    switcher.active_region.add_child_view(Some(&mut view));
     if index == 0 {
-        let mut view = View::from(&browser_view);
-        switcher.active_region.add_child_view(Some(&mut view));
-        switcher.active_region.layout();
         switcher.active_index = 0;
+        switcher.sync_urlbar();
+    } else {
+        view.set_visible(0);
     }
+    switcher.active_region.layout();
+}
+
+/// Shared by `BrowserSwitcherState::switch_to`, `mount_tab_in_switcher`,
+/// and `HostBrowserContext::list_tabs` — the one place that knows how
+/// to pull a live URL back out of a `BrowserView`.
+fn browser_view_url(view: &BrowserView) -> String {
+    view.browser()
+        .and_then(|b| b.main_frame())
+        .map(|f| CefString::from(&f.url()).to_string())
+        .unwrap_or_default()
+}
+
+/// Adds a scheme if the user typed something scheme-less (e.g.
+/// `example.com` or a bare search term) — the same bare-minimum
+/// heuristic every address bar needs, without trying to distinguish a
+/// real domain from a search query (there's no search engine wired up
+/// here to fall back to).
+fn normalize_url_input(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    if looks_like_url(trimmed) {
+        return format!("https://{trimmed}");
+    }
+    // Anything that doesn't look like an address (a plain search term,
+    // or anything with a space in it) goes to Google search instead of
+    // being malformed into `https://<query with spaces>`.
+    let encoded = CefString::from(&uriencode(Some(&CefString::from(trimmed)), 1)).to_string();
+    format!("https://www.google.com/search?q={encoded}")
+}
+
+/// A rough, browser-style heuristic for telling a real address apart
+/// from a search query: no spaces, and either `localhost`, a bare IP,
+/// or a dotted hostname (ignoring a trailing `:port` or `/path`).
+/// Deliberately simple rather than a full URL parser — the cost of a
+/// wrong guess is just falling through to a Google search either way.
+fn looks_like_url(input: &str) -> bool {
+    if input.is_empty() || input.contains(' ') {
+        return false;
+    }
+    let host_part = input.split('/').next().unwrap_or(input).split(':').next().unwrap_or(input);
+    if host_part.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if host_part.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    host_part.contains('.') && !host_part.starts_with('.') && !host_part.ends_with('.')
 }
 
 /// Out of 100 total — the sidebar gets `SIDEBAR_FLEX`% of the window's
@@ -852,19 +965,53 @@ fn open_browser_switcher_window(browser_switcher: &Arc<Mutex<Option<BrowserSwitc
         ..Default::default()
     }));
 
+    // `content_panel` stacks the address bar above `active_region` —
+    // kept as one opaque child of `root_panel` so the sidebar-vs-
+    // content flex swap in `Kernel::open_sidebar_view` doesn't need to
+    // know this vertical split exists at all.
+    let content_panel = panel_create(None).expect("panel_create failed");
+    let content_layout = content_panel.set_to_box_layout(Some(&BoxLayoutSettings {
+        horizontal: 0,
+        cross_axis_alignment: AxisAlignment::STRETCH,
+        ..Default::default()
+    }));
+
+    let mut urlbar_delegate = UrlBarDelegate::new(browser_switcher.clone());
+    let urlbar = textfield_create(Some(&mut urlbar_delegate)).expect("textfield_create failed");
+    urlbar.set_placeholder_text(Some(&CefString::from("Enter a URL")));
+    // Hidden until the first tab mounts and `sync_urlbar` decides
+    // whether it's a `Browser` tab worth showing this for — avoids a
+    // brief flash of an empty address bar before that happens.
+    View::from(&urlbar).set_visible(0);
+
     let active_region = panel_create(None).expect("panel_create failed");
     active_region.set_to_fill_layout();
 
+    let mut urlbar_view = View::from(&urlbar);
+    content_panel.add_child_view(Some(&mut urlbar_view));
+    // No explicit flex for the urlbar row — unlike `BrowserView`
+    // (see `SIDEBAR_FLEX`'s doc comment), a plain `Textfield`'s
+    // preferred size *is* honored at `flex: 0`, so it sizes to its own
+    // natural single-line height instead of collapsing.
     let mut active_region_view = View::from(&active_region);
-    root_panel.add_child_view(Some(&mut active_region_view));
+    content_panel.add_child_view(Some(&mut active_region_view));
+    if let Some(content_layout) = &content_layout {
+        content_layout.set_flex_for_view(Some(&mut active_region_view), 1);
+    }
+    content_panel.layout();
+
+    let mut content_panel_view = View::from(&content_panel);
+    root_panel.add_child_view(Some(&mut content_panel_view));
     if let Some(root_layout) = &root_layout {
-        root_layout.set_flex_for_view(Some(&mut active_region_view), CONTENT_FLEX);
+        root_layout.set_flex_for_view(Some(&mut content_panel_view), CONTENT_FLEX);
     }
     root_panel.layout();
 
     *browser_switcher.lock().expect("browser switcher lock poisoned") = Some(BrowserSwitcherState {
         root_panel: root_panel.clone(),
         root_layout,
+        content_panel: content_panel.clone(),
+        urlbar,
         active_region: active_region.clone(),
         tabs: Vec::new(),
         active_index: 0,
@@ -957,6 +1104,50 @@ wrap_browser_view_delegate! {
     }
 }
 
+// Native browser-chrome, not a Facet — unlike the sidebar, this isn't
+// something a user should need to author HTML to restyle; it's the
+// same host-level address bar every browser has. Fires on the UI
+// thread via a plain Views widget event, independent of the
+// `InputBridge`-mutex call stack `SwitchTabTask`/`post_task` was
+// needed for, so no deferral is needed here.
+wrap_textfield_delegate! {
+    struct UrlBarDelegate {
+        browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+    }
+
+    impl ViewDelegate {}
+    impl TextfieldDelegate {
+        fn on_key_event(&self, textfield: Option<&mut Textfield>, event: Option<&KeyEvent>) -> i32 {
+            let Some(event) = event else { return 0 };
+            // `windows_key_code` is CEF's cross-platform virtual-key
+            // code field (named for its origin, not Windows-only) —
+            // 13 is Enter/Return on every platform. Confirmed via
+            // logging that this platform's `Textfield` only ever
+            // delivers Enter as `RAWKEYDOWN`, never `KEYDOWN`/`CHAR` —
+            // matching both here rather than assuming `KEYDOWN`.
+            let is_enter = event.windows_key_code == 13
+                && (event.type_ == KeyEventType::KEYDOWN || event.type_ == KeyEventType::RAWKEYDOWN);
+            if !is_enter {
+                return 0;
+            }
+            let Some(textfield) = textfield else { return 0 };
+            let typed = CefString::from(&textfield.text()).to_string();
+            let url = normalize_url_input(&typed);
+            let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
+            if let Some(switcher) = guard.as_mut() {
+                if let Some((_, view, _, _)) = switcher.tabs.get(switcher.active_index) {
+                    if let Some(frame) = view.browser().and_then(|b| b.main_frame()) {
+                        frame.load_url(Some(&CefString::from(url.as_str())));
+                    }
+                }
+            }
+            drop(guard);
+            textfield.set_text(Some(&CefString::from(url.as_str())));
+            1
+        }
+    }
+}
+
 impl rashomon::browser::types::Host for KernelState {}
 
 impl rashomon::browser::types::HostBrowserContext for KernelState {
@@ -1003,19 +1194,14 @@ impl rashomon::browser::types::HostBrowserContext for KernelState {
         switcher
             .tabs
             .iter()
-            .map(|(id, view)| {
-                // No separate per-tab title tracking yet (the page's
-                // real `document.title` would need its own
-                // `DisplayHandler`, wired uniformly across both
-                // `create_tab`'s `TabClient` and Facet Views'
-                // `KernelClient`) — the current URL doubles as the
-                // label for now.
-                let url = view
-                    .browser()
-                    .and_then(|b| b.main_frame())
-                    .map(|f| CefString::from(&f.url()).to_string())
-                    .unwrap_or_default();
-                rashomon::browser::types::TabInfo { id: id.clone(), url: url.clone(), title: url }
+            .map(|(id, view, title, _kind)| {
+                let url = browser_view_url(view);
+                // The real tracked `document.title`, falling back to
+                // the url for the brief window before the page's own
+                // title has fired (or for a page that never sets one).
+                let tracked = title.lock().expect("title lock poisoned").clone();
+                let title = if tracked.is_empty() { url.clone() } else { tracked };
+                rashomon::browser::types::TabInfo { id: id.clone(), url, title }
             })
             .collect()
     }
@@ -1200,7 +1386,7 @@ impl rashomon::browser::control::Host for KernelState {
         .expect("browser_view_create failed");
 
         let id = format!("tab-{}", next_tab_id());
-        mount_tab_in_switcher(id.clone(), &self.browser_switcher, browser_view.clone());
+        mount_tab_in_switcher(id.clone(), &self.browser_switcher, browser_view.clone(), title.clone(), TabKind::Browser);
 
         self.table
             .push(BrowserTab { id, browser_view, title })
@@ -1358,13 +1544,6 @@ struct ViewHandle {
 /// that maintains `browser_count`.
 struct InputBridge {
     store: Store<KernelState>,
-    /// Set once in `on_context_initialized` and reused for every
-    /// `browser_host_create_browser` call after that — one `Client` can
-    /// back any number of Windows; CEF distinguishes them by the
-    /// `browser`/`frame` each callback receives, not by which `Client`
-    /// instance made the call. `None` only before the app's first
-    /// Window exists.
-    client: Option<Client>,
     browser_count: u32,
     /// Every currently-open View, keyed by the id [`Kernel::open_view`]
     /// assigned it.
@@ -1468,7 +1647,7 @@ impl Kernel {
     /// `browser_host_create_browser` path — that's what lets this mount
     /// anywhere in [`BrowserSwitcherState`] instead of getting its own
     /// native window.
-    fn create_view_browser_view(&self, view_id: &str) -> Result<(String, BrowserView)> {
+    fn create_view_browser_view(&self, view_id: &str) -> Result<(String, BrowserView, Arc<Mutex<String>>)> {
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
         let view = bridge
             .views
@@ -1485,16 +1664,20 @@ impl Kernel {
             .pending
             .insert(window_id.clone(), String::new());
         bridge.windows.insert(window_id.clone(), view_id.to_string());
-
-        let mut client = bridge
-            .client
-            .clone()
-            .ok_or_else(|| anyhow!("no Client yet — called before on_context_initialized?"))?;
+        let bridge_handle = self.bridge.clone();
         // Dropped before calling into CEF: `browser_view_create` can
         // turn around and call `LifeSpanHandler::on_after_created`
         // (which also locks `self.bridge`) before this function
         // returns, and `Mutex` isn't reentrant.
         drop(bridge);
+
+        // A fresh `Client` per View (not the single shared one Facet
+        // Views used to all reuse) — each needs its own title `Arc` so
+        // one View's `on_title_change` can't clobber another's, the
+        // same reason `create_tab` gives every browser tab its own
+        // `TabClient`.
+        let title = Arc::new(Mutex::new(String::new()));
+        let mut client = ViewClient::new(bridge_handle, title.clone());
 
         let settings = BrowserSettings::default();
         let url = CefString::from(html_data_uri(&inject_window_id(&html, &window_id)).as_str());
@@ -1509,7 +1692,7 @@ impl Kernel {
         )
         .ok_or_else(|| anyhow!("browser_view_create failed"))?;
 
-        Ok((window_id, browser_view))
+        Ok((window_id, browser_view, title))
     }
 
     /// Mounts a new tab into the shared switcher window mirroring the
@@ -1518,8 +1701,8 @@ impl Kernel {
     /// `terminal-xterm`) as every other tab mirroring this View; output
     /// is fanned out to all of them via `pending` (see [`ViewHandle`]).
     fn open_window(&self, view_id: &str) -> Result<String> {
-        let (window_id, browser_view) = self.create_view_browser_view(view_id)?;
-        mount_tab_in_switcher(window_id.clone(), &self.browser_switcher, browser_view);
+        let (window_id, browser_view, title) = self.create_view_browser_view(view_id)?;
+        mount_tab_in_switcher(window_id.clone(), &self.browser_switcher, browser_view, title, TabKind::FacetView);
         Ok(window_id)
     }
 
@@ -1530,32 +1713,34 @@ impl Kernel {
     /// [`open_browser_switcher_window`], since the sidebar wasn't ready
     /// yet) so it still ends up on the left.
     fn open_sidebar_view(&self, view_id: &str) -> Result<String> {
-        let (window_id, browser_view) = self.create_view_browser_view(view_id)?;
+        let (window_id, browser_view, _title) = self.create_view_browser_view(view_id)?;
 
         let mut guard = self.browser_switcher.lock().expect("browser switcher lock poisoned");
         let switcher = guard
             .as_mut()
             .ok_or_else(|| anyhow!("no browser switcher window yet"))?;
         let mut view = View::from(&browser_view);
-        // Full teardown and rebuild — remove `active_region`, then
-        // re-add both fresh, sidebar first — rather than
-        // `add_child_view_at(.., 0)` to insert the sidebar before an
-        // already-mounted, already-flexed sibling.
-        let mut active_region_view = View::from(&switcher.active_region);
-        switcher.root_panel.remove_child_view(Some(&mut active_region_view));
+        // Full teardown and rebuild — remove `content_panel` (which
+        // holds the urlbar + `active_region` stacked vertically, see
+        // `open_browser_switcher_window`), then re-add both fresh,
+        // sidebar first — rather than `add_child_view_at(.., 0)` to
+        // insert the sidebar before an already-mounted, already-flexed
+        // sibling.
+        let mut content_panel_view = View::from(&switcher.content_panel);
+        switcher.root_panel.remove_child_view(Some(&mut content_panel_view));
         switcher.root_panel.add_child_view(Some(&mut view));
-        switcher.root_panel.add_child_view(Some(&mut active_region_view));
+        switcher.root_panel.add_child_view(Some(&mut content_panel_view));
         if let Some(root_layout) = &switcher.root_layout {
             // Confirmed empirically (via bounds logging) that this
             // binding's `set_flex_for_view` assigns shares inverted
             // from every other CEF Views flex convention in this
             // codebase: `view` (the sidebar) needs `CONTENT_FLEX` to
             // end up with `SIDEBAR_FLEX`'s share, and vice versa for
-            // `active_region`. Not a typo — verified three other
+            // `content_panel`. Not a typo — verified three other
             // "natural" orderings all produced the exact swap this
             // avoids.
             root_layout.set_flex_for_view(Some(&mut view), CONTENT_FLEX);
-            root_layout.set_flex_for_view(Some(&mut active_region_view), SIDEBAR_FLEX);
+            root_layout.set_flex_for_view(Some(&mut content_panel_view), SIDEBAR_FLEX);
         }
         switcher.root_panel.layout();
 
@@ -1673,14 +1858,24 @@ impl BrowserSideHandler for InputQueryHandler {
     }
 }
 
+// One fresh instance per View (see `Kernel::create_view_browser_view`),
+// each with its own `title` `Arc` fed by `TabDisplayHandler` — the
+// same title-tracking mechanism `TabClient` uses for real browser
+// tabs, so `list-tabs` can report a real title uniformly regardless
+// of whether the tab is a Facet View or a website.
 wrap_client! {
-    pub struct KernelClient {
-        kernel: Arc<Kernel>,
+    pub struct ViewClient {
+        bridge: Arc<Mutex<InputBridge>>,
+        title: Arc<Mutex<String>>,
     }
 
     impl Client {
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(KernelLifeSpanHandler::new(self.kernel.bridge.clone()))
+            Some(KernelLifeSpanHandler::new(self.bridge.clone()))
+        }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(TabDisplayHandler::new(self.title.clone()))
         }
 
         fn on_process_message_received(
@@ -1751,8 +1946,6 @@ wrap_browser_process_handler! {
         /// page load the way the iframe-pane design (see the module doc
         /// comment) needed to.
         fn on_context_initialized(&self) {
-            let client = KernelClient::new(self.kernel.clone());
-
             let router = BROWSER_ROUTER.get_or_init(|| BrowserSideRouter::new(message_router_config()));
             router.add_handler(
                 Arc::new(InputQueryHandler {
@@ -1760,8 +1953,6 @@ wrap_browser_process_handler! {
                 }),
                 false,
             );
-
-            self.kernel.bridge.lock().expect("input bridge lock poisoned").client = Some(client);
 
             // Must happen before the `browser` Facet's `render()` call
             // below — `create-tab` needs `browser_switcher` to already
@@ -2133,7 +2324,6 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     // through any further direct use in this function.
     let bridge = Arc::new(Mutex::new(InputBridge {
         store,
-        client: None,
         browser_count: 0,
         views: HashMap::new(),
         windows: HashMap::new(),
