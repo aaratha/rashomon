@@ -2322,6 +2322,34 @@ pub mod rashomon {
                     result19
                 }
             }
+            #[allow(unused_unsafe, clippy::all)]
+            /// Deletes a Node and every Edge touching it. Deleting an `entity`
+            /// Node cascades: every `occurrence` Node connected to it via an
+            /// `occurrence-of` Edge is deleted too (an Occurrence has no
+            /// identity of its own apart from the Entity it's an occurrence
+            /// of, so leaving it behind orphaned would be more confusing than
+            /// useful) — deleting an `occurrence` Node directly does not
+            /// cascade back up to its Entity. Returns `false` if `id` didn't
+            /// exist.
+            pub fn delete_node(id: &str) -> bool {
+                unsafe {
+                    let vec0 = id;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "rashomon:graph/store")]
+                    unsafe extern "C" {
+                        #[link_name = "delete-node"]
+                        fn wit_import1(_: *mut u8, _: usize) -> i32;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8, _: usize) -> i32 {
+                        unreachable!()
+                    }
+                    let ret = unsafe { wit_import1(ptr0.cast_mut(), len0) };
+                    _rt::bool_lift(ret as u8)
+                }
+            }
         }
     }
     pub mod process {
@@ -3114,6 +3142,17 @@ mod _rt {
             self as f32
         }
     }
+    pub unsafe fn bool_lift(val: u8) -> bool {
+        if cfg!(debug_assertions) {
+            match val {
+                0 => false,
+                1 => true,
+                _ => panic!("invalid bool discriminant"),
+            }
+        } else {
+            val != 0
+        }
+    }
     use core::fmt;
     use core::marker;
     use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -3247,17 +3286,6 @@ mod _rt {
             self as i32
         }
     }
-    pub unsafe fn bool_lift(val: u8) -> bool {
-        if cfg!(debug_assertions) {
-            match val {
-                0 => false,
-                1 => true,
-                _ => panic!("invalid bool discriminant"),
-            }
-        } else {
-            val != 0
-        }
-    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen_rt::run_ctors_once();
@@ -3300,14 +3328,14 @@ pub(crate) use __export_facet_world_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2490] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb8\x12\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2515] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd1\x12\x01A\x02\x01\
 A\x15\x01B\x09\x01m\x02\x06entity\x0aoccurrence\x04\0\x04role\x03\0\0\x01r\x02\x03\
 keys\x05values\x04\0\x08property\x03\0\x02\x01p\x03\x01r\x04\x02ids\x09node-type\
 s\x04role\x01\x0aproperties\x04\x04\0\x04node\x03\0\x05\x01r\x06\x02ids\x09edge-\
 types\x06sources\x06targets\x09timestampw\x0aconfidencev\x04\0\x04edge\x03\0\x07\
 \x03\0\x14rashomon:graph/types\x05\0\x02\x03\0\0\x04role\x02\x03\0\0\x04node\x02\
-\x03\0\0\x04edge\x02\x03\0\0\x08property\x01B\x19\x02\x03\x02\x01\x01\x04\0\x04r\
+\x03\0\0\x04edge\x02\x03\0\0\x08property\x01B\x1b\x02\x03\x02\x01\x01\x04\0\x04r\
 ole\x03\0\0\x02\x03\x02\x01\x02\x04\0\x04node\x03\0\x02\x02\x03\x02\x01\x03\x04\0\
 \x04edge\x03\0\x04\x02\x03\x02\x01\x04\x04\0\x08property\x03\0\x06\x01p\x07\x01@\
 \x03\x09node-types\x09node-role\x01\x0aproperties\x08\0\x03\x04\0\x0bcreate-node\
@@ -3315,46 +3343,47 @@ ole\x03\0\0\x02\x03\x02\x01\x02\x04\0\x04node\x03\0\x02\x02\x03\x02\x01\x03\x04\
 ge-types\x06sources\x06targets\x0aconfidencev\0\x05\x04\0\x0bcreate-edge\x01\x0c\
 \x01p\x05\x01@\x01\x07node-ids\0\x0d\x04\0\x10query-edges-from\x01\x0e\x04\0\x0e\
 query-edges-to\x01\x0e\x01p\x03\x01@\0\0\x0f\x04\0\x0alist-nodes\x01\x10\x01@\0\0\
-\x0d\x04\0\x0alist-edges\x01\x11\x03\0\x14rashomon:graph/store\x05\x05\x01B\x10\x04\
-\0\x07process\x03\x01\x01h\0\x01p}\x01j\x01y\x01s\x01@\x02\x04self\x01\x04data\x02\
-\0\x03\x04\0\x15[method]process.write\x01\x04\x01j\x01\x02\x01s\x01@\x02\x04self\
-\x01\x09max-bytesy\0\x05\x04\0\x14[method]process.read\x01\x06\x01j\0\x01s\x01@\x03\
-\x04self\x01\x04colsy\x04rowsy\0\x07\x04\0\x16[method]process.resize\x01\x08\x01\
-@\x02\x04self\x01\x03sigs\0\x07\x04\0\x16[method]process.signal\x01\x09\x01@\x01\
-\x04self\x01\0z\x04\0\x14[method]process.wait\x01\x0a\x03\0\x16rashomon:process/\
-types\x05\x06\x02\x03\0\x02\x07process\x01B\x0a\x02\x03\x02\x01\x07\x04\0\x07pro\
-cess\x03\0\0\x01ps\x01ks\x01i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\
-\x02\x03cwd\x03\0\x05\x04\0\x05spawn\x01\x06\x01@\0\0s\x04\0\x0ddefault-shell\x01\
-\x07\x03\0\x18rashomon:process/spawner\x05\x08\x01B,\x04\0\x0fbrowser-context\x03\
-\x01\x01r\x03\x02ids\x04names\x0esource-browsers\x04\0\x13extension-candidate\x03\
-\0\x01\x01r\x03\x02ids\x04names\x0apopup-open\x7f\x04\0\x0eextension-info\x03\0\x03\
-\x01r\x03\x02ids\x03urls\x05titles\x04\0\x08tab-info\x03\0\x05\x04\0\x0bbrowser-\
-tab\x03\x01\x01h\0\x01@\x01\x04self\x08\0s\x04\0\x1a[method]browser-context.id\x01\
-\x09\x01p\x04\x01@\x01\x04self\x08\0\x0a\x04\0'[method]browser-context.list-exte\
-nsions\x01\x0b\x01j\0\x01s\x01@\x02\x04self\x08\x0cextension-ids\0\x0c\x04\0.[me\
-thod]browser-context.toggle-extension-popup\x01\x0d\x01p\x02\x01@\x01\x04self\x08\
-\0\x0e\x04\01[method]browser-context.list-extension-candidates\x01\x0f\x01@\x02\x04\
-self\x08\x0ccandidate-ids\0\x0c\x04\0%[method]browser-context.add-extension\x01\x10\
-\x04\0([method]browser-context.remove-extension\x01\x0d\x01p\x06\x01@\x01\x04sel\
-f\x08\0\x11\x04\0![method]browser-context.list-tabs\x01\x12\x01@\x02\x04self\x08\
-\x06tab-ids\0\x0c\x04\0%[method]browser-context.switch-to-tab\x01\x13\x01h\x07\x01\
-@\x01\x04self\x14\0s\x04\0\x16[method]browser-tab.id\x01\x15\x01@\x02\x04self\x14\
-\x03urls\0\x0c\x04\0\x1c[method]browser-tab.navigate\x01\x16\x04\0\x1f[method]br\
-owser-tab.current-url\x01\x15\x04\0\x19[method]browser-tab.title\x01\x15\x01@\x01\
-\x04self\x14\x01\0\x04\0\x19[method]browser-tab.close\x01\x17\x01j\x01s\x01s\x01\
-@\x01\x04self\x14\0\x18\x04\0\x20[method]browser-tab.snapshot-dom\x01\x19\x01@\x02\
-\x04self\x14\x06scripts\0\x18\x04\0![method]browser-tab.inject-script\x01\x1a\x01\
-@\x02\x04self\x14\x04specs\0\x18\x04\0\x1a[method]browser-tab.anchor\x01\x1b\x03\
-\0\x16rashomon:browser/types\x05\x09\x02\x03\0\x04\x0fbrowser-context\x02\x03\0\x04\
-\x0bbrowser-tab\x01B\x0b\x02\x03\x02\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\
-\x03\x02\x01\x0b\x04\0\x0bbrowser-tab\x03\0\x02\x01i\x01\x01@\0\0\x04\x04\0\x0ec\
-reate-context\x01\x05\x01h\x01\x01i\x03\x01@\x02\x07context\x06\x03urls\0\x07\x04\
-\0\x0acreate-tab\x01\x08\x03\0\x18rashomon:browser/control\x05\x0c\x01B\x07\x01@\
-\x01\x07node-ids\0s\x04\0\x06render\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0c\
-handle-input\x01\x02\x01@\0\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:fa\
-cet/contract\x05\x0d\x04\0\x1crashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0b\
-facet-world\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x07\
-0.227.1\x10wit-bindgen-rust\x060.41.0";
+\x0d\x04\0\x0alist-edges\x01\x11\x01@\x01\x02ids\0\x7f\x04\0\x0bdelete-node\x01\x12\
+\x03\0\x14rashomon:graph/store\x05\x05\x01B\x10\x04\0\x07process\x03\x01\x01h\0\x01\
+p}\x01j\x01y\x01s\x01@\x02\x04self\x01\x04data\x02\0\x03\x04\0\x15[method]proces\
+s.write\x01\x04\x01j\x01\x02\x01s\x01@\x02\x04self\x01\x09max-bytesy\0\x05\x04\0\
+\x14[method]process.read\x01\x06\x01j\0\x01s\x01@\x03\x04self\x01\x04colsy\x04ro\
+wsy\0\x07\x04\0\x16[method]process.resize\x01\x08\x01@\x02\x04self\x01\x03sigs\0\
+\x07\x04\0\x16[method]process.signal\x01\x09\x01@\x01\x04self\x01\0z\x04\0\x14[m\
+ethod]process.wait\x01\x0a\x03\0\x16rashomon:process/types\x05\x06\x02\x03\0\x02\
+\x07process\x01B\x0a\x02\x03\x02\x01\x07\x04\0\x07process\x03\0\0\x01ps\x01ks\x01\
+i\x01\x01j\x01\x04\x01s\x01@\x03\x07commands\x04args\x02\x03cwd\x03\0\x05\x04\0\x05\
+spawn\x01\x06\x01@\0\0s\x04\0\x0ddefault-shell\x01\x07\x03\0\x18rashomon:process\
+/spawner\x05\x08\x01B,\x04\0\x0fbrowser-context\x03\x01\x01r\x03\x02ids\x04names\
+\x0esource-browsers\x04\0\x13extension-candidate\x03\0\x01\x01r\x03\x02ids\x04na\
+mes\x0apopup-open\x7f\x04\0\x0eextension-info\x03\0\x03\x01r\x03\x02ids\x03urls\x05\
+titles\x04\0\x08tab-info\x03\0\x05\x04\0\x0bbrowser-tab\x03\x01\x01h\0\x01@\x01\x04\
+self\x08\0s\x04\0\x1a[method]browser-context.id\x01\x09\x01p\x04\x01@\x01\x04sel\
+f\x08\0\x0a\x04\0'[method]browser-context.list-extensions\x01\x0b\x01j\0\x01s\x01\
+@\x02\x04self\x08\x0cextension-ids\0\x0c\x04\0.[method]browser-context.toggle-ex\
+tension-popup\x01\x0d\x01p\x02\x01@\x01\x04self\x08\0\x0e\x04\01[method]browser-\
+context.list-extension-candidates\x01\x0f\x01@\x02\x04self\x08\x0ccandidate-ids\0\
+\x0c\x04\0%[method]browser-context.add-extension\x01\x10\x04\0([method]browser-c\
+ontext.remove-extension\x01\x0d\x01p\x06\x01@\x01\x04self\x08\0\x11\x04\0![metho\
+d]browser-context.list-tabs\x01\x12\x01@\x02\x04self\x08\x06tab-ids\0\x0c\x04\0%\
+[method]browser-context.switch-to-tab\x01\x13\x01h\x07\x01@\x01\x04self\x14\0s\x04\
+\0\x16[method]browser-tab.id\x01\x15\x01@\x02\x04self\x14\x03urls\0\x0c\x04\0\x1c\
+[method]browser-tab.navigate\x01\x16\x04\0\x1f[method]browser-tab.current-url\x01\
+\x15\x04\0\x19[method]browser-tab.title\x01\x15\x01@\x01\x04self\x14\x01\0\x04\0\
+\x19[method]browser-tab.close\x01\x17\x01j\x01s\x01s\x01@\x01\x04self\x14\0\x18\x04\
+\0\x20[method]browser-tab.snapshot-dom\x01\x19\x01@\x02\x04self\x14\x06scripts\0\
+\x18\x04\0![method]browser-tab.inject-script\x01\x1a\x01@\x02\x04self\x14\x04spe\
+cs\0\x18\x04\0\x1a[method]browser-tab.anchor\x01\x1b\x03\0\x16rashomon:browser/t\
+ypes\x05\x09\x02\x03\0\x04\x0fbrowser-context\x02\x03\0\x04\x0bbrowser-tab\x01B\x0b\
+\x02\x03\x02\x01\x0a\x04\0\x0fbrowser-context\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x0b\
+browser-tab\x03\0\x02\x01i\x01\x01@\0\0\x04\x04\0\x0ecreate-context\x01\x05\x01h\
+\x01\x01i\x03\x01@\x02\x07context\x06\x03urls\0\x07\x04\0\x0acreate-tab\x01\x08\x03\
+\0\x18rashomon:browser/control\x05\x0c\x01B\x07\x01@\x01\x07node-ids\0s\x04\0\x06\
+render\x01\0\x01ps\x01@\x01\x05events\0\x01\x04\0\x0chandle-input\x01\x02\x01@\0\
+\0s\x04\0\x0bpoll-output\x01\x03\x04\0\x17rashomon:facet/contract\x05\x0d\x04\0\x1c\
+rashomon:runtime/facet-world\x04\0\x0b\x11\x01\0\x0bfacet-world\x03\0\0\0G\x09pr\
+oducers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x06\
+0.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

@@ -65,7 +65,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use cef::wrapper::message_router::*;
@@ -120,6 +120,41 @@ struct KernelState {
     /// window every tab gets mounted into — `create_tab` must never be
     /// called before that happens.
     browser_switcher: Arc<Mutex<Option<BrowserSwitcherState>>>,
+    /// The id of this process's one session-root `rashomon:thread`
+    /// Entity, created once at the very start of
+    /// [`run_browser_process`] (see that function's doc comment) —
+    /// every Node any Facet creates afterward via `create-node` gets
+    /// linked to it automatically (see
+    /// `rashomon::graph::store::Host::create_node`'s impl below), and
+    /// it's what [`Kernel::open_view`] checks a Node against to decide
+    /// whether opening it counts as a *fresh* access to something that
+    /// predates this session.
+    session_root_id: String,
+    /// One `rashomon:page` Entity id per URL any real browser tab has
+    /// ever navigated to, across every session — populated once at
+    /// startup from whatever's already persisted (see
+    /// `run_browser_process`), then kept live-updated by
+    /// [`record_page_visit`]. The point: navigating to a URL for the
+    /// first time ever creates this Entity; every navigation after
+    /// that (this session or a later one) finds it here instead of
+    /// creating a duplicate, and gets recorded as an Occurrence of it
+    /// instead.
+    page_entities: HashMap<String, String>,
+    /// A clone of the very `Arc<Mutex<InputBridge>>` that wraps the
+    /// `Store` this `KernelState` lives inside — `None` only for the
+    /// brief window between that `Arc` being constructed and this
+    /// field being set to a clone of it right after (see
+    /// `run_browser_process`); every real use happens well after that.
+    /// Needed because `rashomon::browser::control::Host::create_tab`
+    /// only ever gets `&mut self: KernelState` to work with (the
+    /// Host trait's shape is fixed by `wasmtime::component::bindgen!`),
+    /// with no way to also receive the surrounding `Arc` as a separate
+    /// parameter — but it still needs to hand one to `TabClient` (see
+    /// `create_tab`'s body), so a tab's `on_address_change` can safely
+    /// re-lock the bridge *later*, from CEF's own independent callback
+    /// (not nested inside whatever call is already holding the lock
+    /// while `create_tab` itself runs).
+    bridge_handle: Option<Arc<Mutex<InputBridge>>>,
 }
 
 impl WasiView for KernelState {
@@ -133,7 +168,22 @@ impl WasiView for KernelState {
 
 impl rashomon::graph::types::Host for KernelState {}
 
+/// Edge type linking a Node to the session-root `rashomon:thread` that
+/// was active when it was created — see [`KernelState::session_root_id`].
+/// Deliberately distinct from `"occurrence-of"`: that edge means
+/// "is an occurrence of this Entity" (and drives cascading deletes —
+/// see `rashomon::graph::store::Host::delete_node`'s impl below), a
+/// completely different relationship from "was created during this
+/// run of the app."
+const PART_OF_THREAD_EDGE: &str = "part-of-thread";
+
 impl rashomon::graph::store::Host for KernelState {
+    /// Every Node created this way — i.e. by a Facet, through the WIT
+    /// boundary, as opposed to the handful `run_browser_process`
+    /// creates directly before any Facet runs — gets linked to this
+    /// session's root thread automatically, with zero cooperation
+    /// needed from the Facet creating it. See
+    /// [`KernelState::session_root_id`]'s doc comment.
     fn create_node(
         &mut self,
         node_type: String,
@@ -141,9 +191,7 @@ impl rashomon::graph::store::Host for KernelState {
         properties: Vec<rashomon::graph::types::Property>,
     ) -> rashomon::graph::types::Node {
         let properties = properties.into_iter().map(|p| (p.key, p.value)).collect();
-        let node = self
-            .graph
-            .create_node(&node_type, to_lib_role(node_role), properties);
+        let node = create_node_in_session(self, &node_type, to_lib_role(node_role), properties);
         to_wit_node(node)
     }
 
@@ -183,6 +231,37 @@ impl rashomon::graph::store::Host for KernelState {
 
     fn list_edges(&mut self) -> Vec<rashomon::graph::types::Edge> {
         self.graph.all_edges().into_iter().map(to_wit_edge).collect()
+    }
+
+    /// `GraphStore::delete_node` (the generic store primitive) has no
+    /// idea what an `occurrence-of` Edge means — that cascade is a
+    /// `rashomon:graph` domain convention, so it lives here instead:
+    /// deleting an `entity` Node first deletes every `occurrence` Node
+    /// connected to it via an `occurrence-of` Edge (found the same way
+    /// `create_tab`-style Facets create that edge in the first place —
+    /// `occurrence-of` points *from* the Occurrence *to* the Entity),
+    /// then deletes the Entity itself. Deleting an `occurrence` Node
+    /// directly (or any Node whose role can't be determined, e.g. one
+    /// that's already gone) just deletes that one Node — no cascade in
+    /// that direction.
+    fn delete_node(&mut self, id: String) -> bool {
+        let is_entity = matches!(
+            self.graph.get_node(&id).map(|n| n.role),
+            Some(rashomon_graph::Role::Entity)
+        );
+        if is_entity {
+            let occurrence_ids: Vec<String> = self
+                .graph
+                .query_edges_to(&id)
+                .into_iter()
+                .filter(|e| e.edge_type == "occurrence-of")
+                .map(|e| e.source)
+                .collect();
+            for occurrence_id in occurrence_ids {
+                self.graph.delete_node(&occurrence_id);
+            }
+        }
+        self.graph.delete_node(&id)
     }
 }
 
@@ -1088,8 +1167,15 @@ fn content_rect_below_urlbar(window_width: i32, window_height: i32) -> Rect {
     }
 }
 
+// Used by `ViewClient` (Facet Views embedded via a classic CEF browser
+// — the non-macOS fallback only; macOS hosts Facet Views via `wry`
+// instead, with no CEF `DisplayHandler` involved at all) — title
+// tracking only, deliberately *not* the page-visit tracking
+// `TabDisplayHandler` below also does for real browser tabs, since a
+// Facet View's "URL" is just its `data:` HTML payload, not a real page
+// worth recording in the graph.
 wrap_display_handler! {
-    struct TabDisplayHandler {
+    struct TitleOnlyDisplayHandler {
         title: Arc<Mutex<String>>,
     }
 
@@ -1101,14 +1187,75 @@ wrap_display_handler! {
     }
 }
 
+// `visited_url` (below) is this tab's own dedup state: the last URL
+// it's already recorded (via `record_page_visit`) — `None` initially,
+// so the very first navigation always records. Lives for exactly this
+// `Browser`'s lifetime: once it's closed, this (and the `Arc` holding
+// it) is dropped along with the rest of this `TabClient`/
+// `TabDisplayHandler` pair, so a brand new tab later navigating to the
+// same URL has fresh dedup state and records again — the "once per
+// session unless manually closed and reopened" policy, enforced
+// simply by tying the dedup state's lifetime to the tab's own. (A
+// plain `//` comment, not `///` — this macro's own parser doesn't
+// accept doc-comment attributes between fields.)
+wrap_display_handler! {
+    struct TabDisplayHandler {
+        title: Arc<Mutex<String>>,
+        bridge: Arc<Mutex<InputBridge>>,
+        visited_url: Arc<Mutex<Option<String>>>,
+    }
+
+    impl DisplayHandler {
+        fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            *self.title.lock().expect("title lock poisoned") =
+                title.map(|t| t.to_string()).unwrap_or_default();
+        }
+
+        /// Fires for every real navigation of this tab's main frame —
+        /// filtered to the main frame specifically (`frame.is_main()`)
+        /// so an embedded iframe's own, unrelated navigation doesn't
+        /// get mistaken for "this tab navigated somewhere new." Dedupes
+        /// repeat arrivals at the *same* URL (e.g. a reload, or
+        /// navigating away and back) against `visited_url` before
+        /// handing off to [`record_page_visit`] — without this, every
+        /// single reload of an already-visited page would record
+        /// another Occurrence, which isn't "a further navigation" in
+        /// any meaningful sense.
+        fn on_address_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            url: Option<&CefString>,
+        ) {
+            let Some(frame) = frame else { return };
+            if frame.is_main() == 0 {
+                return;
+            }
+            let Some(url) = url else { return };
+            let url = url.to_string();
+
+            let mut visited = self.visited_url.lock().expect("visited url lock poisoned");
+            if visited.as_deref() == Some(url.as_str()) {
+                return;
+            }
+            *visited = Some(url.clone());
+            drop(visited);
+
+            record_page_visit(&self.bridge, &url);
+        }
+    }
+}
+
 wrap_client! {
     struct TabClient {
         title: Arc<Mutex<String>>,
+        bridge: Arc<Mutex<InputBridge>>,
+        visited_url: Arc<Mutex<Option<String>>>,
     }
 
     impl Client {
         fn display_handler(&self) -> Option<DisplayHandler> {
-            Some(TabDisplayHandler::new(self.title.clone()))
+            Some(TabDisplayHandler::new(self.title.clone(), self.bridge.clone(), self.visited_url.clone()))
         }
     }
 }
@@ -1344,7 +1491,11 @@ impl rashomon::browser::control::Host for KernelState {
     /// meantime.
     fn create_tab(&mut self, _context: Resource<BrowserContext>, url: String) -> Resource<BrowserTab> {
         let title = Arc::new(Mutex::new(String::new()));
-        let mut client = TabClient::new(title.clone());
+        let bridge_handle = self
+            .bridge_handle
+            .clone()
+            .expect("bridge_handle set immediately after InputBridge construction, before any Facet ever runs");
+        let mut client = TabClient::new(title.clone(), bridge_handle, Arc::new(Mutex::new(None)));
         let native_parent_and_rect = self
             .browser_switcher
             .lock()
@@ -1541,6 +1692,85 @@ pub(crate) struct InputBridge {
     next_window_id: u64,
 }
 
+/// Creates a Node exactly the way `rashomon::graph::store::Host::create_node`
+/// does for Facets going through the WIT boundary — including the
+/// link to this session's root thread (see
+/// [`KernelState::session_root_id`]) — for the handful of Nodes
+/// `run_browser_process`/[`record_access`] create directly in host
+/// Rust code instead of through a Facet.
+fn create_node_in_session(
+    state: &mut KernelState,
+    node_type: &str,
+    role: rashomon_graph::Role,
+    properties: HashMap<String, String>,
+) -> rashomon_graph::Node {
+    let node = state.graph.create_node(node_type, role, properties);
+    if !state.session_root_id.is_empty() {
+        state
+            .graph
+            .create_edge(PART_OF_THREAD_EDGE, &node.id, &state.session_root_id, 1.0);
+    }
+    node
+}
+
+/// Called from [`Kernel::open_view`] every time a View opens against
+/// `node_id` — if that Node already existed *before* this call (it's
+/// not an Entity, or it doesn't exist at all, this is a no-op) and
+/// wasn't itself created earlier in *this* session (checked via
+/// [`PART_OF_THREAD_EDGE`] rather than, say, a timestamp comparison,
+/// since that edge is the one thing every session-created Node
+/// unconditionally gets), this counts as freshly accessing something
+/// that predates this session — recorded as a new Occurrence pointed
+/// at it, the same `occurrence-of` relationship `terminal-xterm`'s own
+/// `render()` creates by hand for a brand new shell session, just
+/// driven here generically for *any* Entity instead of one Facet's
+/// own domain-specific bookkeeping.
+fn record_access(state: &mut KernelState, node_id: &str) {
+    let Some(node) = state.graph.get_node(node_id) else { return };
+    if !matches!(node.role, rashomon_graph::Role::Entity) {
+        return;
+    }
+    let created_this_session = state
+        .graph
+        .query_edges_from(node_id)
+        .into_iter()
+        .any(|e| e.edge_type == PART_OF_THREAD_EDGE && e.target == state.session_root_id);
+    if created_this_session {
+        return;
+    }
+    let occurrence =
+        create_node_in_session(state, "rashomon:view-access", rashomon_graph::Role::Occurrence, HashMap::new());
+    state.graph.create_edge("occurrence-of", &occurrence.id, node_id, 1.0);
+}
+
+/// Called from `TabDisplayHandler::on_address_change` whenever a real
+/// browser tab's main frame navigates somewhere that handler's own
+/// per-tab dedup (see its doc comment) already decided is worth
+/// recording. Finds or creates the one `rashomon:page` Entity for
+/// `url` — the *first* navigation anywhere, ever, to a given URL is
+/// what creates it (labeled with its own `url` property); every
+/// navigation after that, in this session or a later one, finds it
+/// here in [`KernelState::page_entities`] instead of creating a
+/// duplicate, and gets recorded as a `rashomon:page-visit` Occurrence
+/// of it instead.
+fn record_page_visit(bridge: &Arc<Mutex<InputBridge>>, url: &str) {
+    let mut bridge = bridge.lock().expect("input bridge lock poisoned");
+    let state = bridge.store.data_mut();
+    if let Some(entity_id) = state.page_entities.get(url).cloned() {
+        let occurrence = create_node_in_session(
+            state,
+            "rashomon:page-visit",
+            rashomon_graph::Role::Occurrence,
+            HashMap::new(),
+        );
+        state.graph.create_edge("occurrence-of", &occurrence.id, &entity_id, 1.0);
+    } else {
+        let properties = HashMap::from([("url".to_string(), url.to_string())]);
+        let entity = create_node_in_session(state, "rashomon:page", rashomon_graph::Role::Entity, properties);
+        state.page_entities.insert(url.to_string(), entity.id);
+    }
+}
+
 /// Everything needed to open a new View or mirror an existing one in a
 /// new mounted tab: which Facets exist to instantiate, the live state
 /// ([`InputBridge`]) either needs to register itself into, and the one
@@ -1569,6 +1799,8 @@ impl Kernel {
     fn open_view(&self, node_id: &str, facet_name: &str) -> Result<String> {
         let component = self.facets.component(facet_name)?;
         let mut bridge = self.bridge.lock().expect("input bridge lock poisoned");
+
+        record_access(bridge.store.data_mut(), node_id);
 
         let bindings = FacetWorld::instantiate(&mut bridge.store, component, &self.facets.linker)
             .map_err(|e| anyhow!("failed to instantiate {facet_name}: {e}"))?;
@@ -1917,7 +2149,7 @@ wrap_client! {
         }
 
         fn display_handler(&self) -> Option<DisplayHandler> {
-            Some(TabDisplayHandler::new(self.title.clone()))
+            Some(TitleOnlyDisplayHandler::new(self.title.clone()))
         }
 
         fn on_process_message_received(
@@ -2436,8 +2668,64 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
             extensions: extensions.clone(),
             extension_candidates: extension_candidates.clone(),
             browser_switcher: browser_switcher.clone(),
+            // Set for real immediately below, once there's a `graph`
+            // to create it against — empty here only because
+            // something has to be here first (`create_node_in_session`
+            // treats an empty id as "no session root yet" and skips
+            // linking, which is exactly right for the one Node, this
+            // one, that must not end up linked to itself).
+            session_root_id: String::new(),
+            // Populated for real immediately below, from whatever
+            // `rashomon:page` Entities already exist — empty here
+            // only because the graph hasn't been scanned yet at this
+            // exact point.
+            page_entities: HashMap::new(),
+            // Set for real immediately below, once the `Arc` wrapping
+            // this very `Store` actually exists to clone — see
+            // `KernelState::bridge_handle`'s doc comment for why this
+            // two-step, set-it-right-after-construction dance is
+            // needed at all.
+            bridge_handle: None,
         },
     );
+
+    // This session's one root `rashomon:thread` — every other Node any
+    // Facet creates from here on (via `create-node`, or the handful
+    // `run_browser_process` itself still creates directly below) gets
+    // linked to it automatically (see `create_node_in_session`), and
+    // it's the fixed point `record_access` checks a Node against to
+    // tell "created this session" apart from "existed before it."
+    let session_started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_secs()
+        .to_string();
+    let session_root_id = store
+        .data_mut()
+        .graph
+        .create_node(
+            "rashomon:thread",
+            rashomon_graph::Role::Entity,
+            HashMap::from([("started-at".to_string(), session_started_at)]),
+        )
+        .id;
+    store.data_mut().session_root_id = session_root_id.clone();
+    println!("session root thread: {session_root_id}");
+
+    // Replays every `rashomon:page` Entity already persisted (from
+    // this Node's own earlier sessions) into `page_entities`, so a
+    // browser tab navigating to a URL it's seen before — even in a
+    // completely different run of the app — finds the existing Entity
+    // instead of minting a duplicate. See `record_page_visit`.
+    let page_entities: HashMap<String, String> = store
+        .data()
+        .graph
+        .all_nodes()
+        .into_iter()
+        .filter(|node| node.node_type == "rashomon:page" && matches!(node.role, rashomon_graph::Role::Entity))
+        .filter_map(|node| node.properties.get("url").cloned().map(|url| (url, node.id)))
+        .collect();
+    store.data_mut().page_entities = page_entities;
 
     // `wasmtime::Error` doesn't implement `std::error::Error`, so
     // anyhow's `.context()`/`.with_context()` extension methods don't
@@ -2457,11 +2745,13 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     // default place to file anything with no more specific type").
     // Created directly against the graph rather than through a
     // Component, since nothing installs/creates Threads yet.
-    let thread_id = store
-        .data_mut()
-        .graph
-        .create_node("rashomon:thread", rashomon_graph::Role::Entity, Default::default())
-        .id;
+    let thread_id = create_node_in_session(
+        store.data_mut(),
+        "rashomon:thread",
+        rashomon_graph::Role::Entity,
+        Default::default(),
+    )
+    .id;
     println!("created thread entity: {thread_id}");
 
     let shell_component = Component::from_file(&engine, &shell_wasm_path)
@@ -2493,20 +2783,24 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
     // One Entity for the `terminal-xterm` View below — a single shell
     // session, mirrored into two Windows (see `initial_views`), so it
     // gets one `occurrence-of` target, not two.
-    let mirrored_thread = store
-        .data_mut()
-        .graph
-        .create_node("rashomon:thread", rashomon_graph::Role::Entity, Default::default())
-        .id;
+    let mirrored_thread = create_node_in_session(
+        store.data_mut(),
+        "rashomon:thread",
+        rashomon_graph::Role::Entity,
+        Default::default(),
+    )
+    .id;
 
     // A durable Entity for the browser Facet's `create-tab` calls to
     // attach their `rashomon:page` Occurrences to, same reasoning as
     // `thread_id` above.
-    let browser_demo_node_id = store
-        .data_mut()
-        .graph
-        .create_node("rashomon:thread", rashomon_graph::Role::Entity, Default::default())
-        .id;
+    let browser_demo_node_id = create_node_in_session(
+        store.data_mut(),
+        "rashomon:thread",
+        rashomon_graph::Role::Entity,
+        Default::default(),
+    )
+    .id;
 
     let terminal_xterm_component =
         Component::from_file(&engine, &terminal_xterm_wasm_path).map_err(|e| {
@@ -2563,6 +2857,10 @@ pub fn run_browser_process(args: &args::Args) -> Result<()> {
         next_view_id: 0,
         next_window_id: 0,
     }));
+    // See `KernelState::bridge_handle`'s doc comment for why
+    // `create_tab` needs this clone of the very `Arc` that wraps the
+    // `Store` its own `KernelState` lives inside.
+    bridge.lock().expect("input bridge lock poisoned").store.data_mut().bridge_handle = Some(bridge.clone());
     let kernel = Arc::new(Kernel {
         facets: FacetRegistry { linker, components: facets },
         bridge,

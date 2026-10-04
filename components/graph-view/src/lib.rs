@@ -2,7 +2,7 @@
 mod bindings;
 
 use bindings::exports::rashomon::facet::contract::Guest;
-use bindings::rashomon::graph::store::{list_edges, list_nodes};
+use bindings::rashomon::graph::store::{delete_node, list_edges, list_nodes};
 use bindings::rashomon::graph::types::Role;
 
 /// Vendored, not loaded from a CDN `<script src>` — this Facet is
@@ -28,7 +28,17 @@ impl Guest for Component {
         PAGE.replace("/*VIS_NETWORK_JS*/", VIS_NETWORK_JS)
     }
 
-    fn handle_input(_event: String) -> Vec<String> {
+    /// The page's own tiny protocol, same pattern as `sidebar`'s
+    /// `switch-tab:<id>` — `"delete:<node-id>"` deletes that Node
+    /// (cascading to its Occurrences if it's an Entity — see
+    /// `delete-node`'s doc comment). The confirmation prompt (and the
+    /// decision to allow deleting from either the list or the diagram
+    /// view) lives entirely in [`PAGE`]'s own JS; by the time this
+    /// runs, the user has already confirmed.
+    fn handle_input(event: String) -> Vec<String> {
+        if let Some(id) = event.strip_prefix("delete:") {
+            delete_node(id);
+        }
         Vec::new()
     }
 
@@ -90,12 +100,41 @@ const PAGE: &str = r#"<!doctype html>
   #network { position: absolute; inset: 0; }
   h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 20px 0 8px; }
   h2:first-child { margin-top: 0; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  /* `table-layout: fixed` (plus the explicit per-column widths below)
+     is what makes the `overflow`/`text-overflow` truncation on `td`
+     actually take effect — with the default `auto` layout, a column
+     just grows to fit its longest cell (e.g. a `rashomon:page`
+     Entity's full, untruncated `url` property) instead of clipping
+     it, which is what was blowing this table out past the window's
+     own width. The full value is still one hover away (`cell()` sets
+     `title` to it unconditionally). */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
   th { text-align: left; color: #888; font-weight: normal; padding: 4px 8px; border-bottom: 1px solid #333; }
-  td { padding: 4px 8px; border-bottom: 1px solid #292929; font-family: ui-monospace, monospace; }
+  td { padding: 4px 8px; border-bottom: 1px solid #292929; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #nodes th:nth-child(1), #nodes td:nth-child(1) { width: 110px; }
+  #nodes th:nth-child(2), #nodes td:nth-child(2) { width: 160px; }
+  #nodes th:nth-child(3), #nodes td:nth-child(3) { width: 90px; }
+  #nodes th:nth-child(5), #nodes td:nth-child(5) { width: 40px; }
+  #edges th:nth-child(1), #edges td:nth-child(1) { width: 140px; }
+  #edges th:nth-child(4), #edges td:nth-child(4) { width: 90px; }
   .entity { color: #7ec8ff; }
   .occurrence { color: #ffcf7e; }
   .empty { color: #666; font-style: italic; padding: 4px 8px; }
+  .delete-btn { padding: 2px 8px; border: none; border-radius: 4px; background: transparent; color: #888; cursor: pointer; font-size: 12px; }
+  .delete-btn:hover { background: #a33; color: #eee; }
+  /* `window.confirm()` is a no-op in this app — `wry`'s WKWebView has
+     no UI delegate wired up for JS dialog panels, so it never shows
+     anything and just returns `false` immediately. This is a from-
+     scratch replacement, not a styling choice. */
+  #confirm-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
+  #confirm-box { background: #2a2a2a; border: 1px solid #444; border-radius: 8px; padding: 16px 20px; max-width: 320px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+  #confirm-message { margin: 0 0 16px; font-size: 13px; color: #eee; }
+  #confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  #confirm-actions button { padding: 6px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  #confirm-cancel-btn { background: #333; color: #eee; }
+  #confirm-cancel-btn:hover { background: #444; }
+  #confirm-ok-btn { background: #a33; color: #eee; }
+  #confirm-ok-btn:hover { background: #c44; }
 </style>
 </head>
 <body>
@@ -109,12 +148,21 @@ const PAGE: &str = r#"<!doctype html>
 </div>
 <div id="list-view">
   <h2>Nodes</h2>
-  <table id="nodes"><thead><tr><th>id</th><th>type</th><th>role</th><th>properties</th></tr></thead><tbody></tbody></table>
+  <table id="nodes"><thead><tr><th>id</th><th>type</th><th>role</th><th>properties</th><th></th></tr></thead><tbody></tbody></table>
   <h2>Edges</h2>
   <table id="edges"><thead><tr><th>type</th><th>source</th><th>target</th><th>confidence</th></tr></thead><tbody></tbody></table>
 </div>
 <div id="diagram-view" style="display:none;">
   <div id="network"></div>
+</div>
+<div id="confirm-overlay">
+  <div id="confirm-box">
+    <p id="confirm-message"></p>
+    <div id="confirm-actions">
+      <button id="confirm-cancel-btn">Cancel</button>
+      <button id="confirm-ok-btn">Delete</button>
+    </div>
+  </div>
 </div>
 <script>
   const windowId = window.__rashomonWindowId || '';
@@ -230,8 +278,78 @@ const PAGE: &str = r#"<!doctype html>
     { passive: false }
   );
 
+  // Diagram-mode deletion: right-click a node (vis-network's own
+  // 'oncontext' event, not a raw listener — it already resolves which
+  // node, if any, is under the pointer) or select one and press
+  // Delete/Backspace. `allNodes` (declared further below, but already
+  // populated by the time either of these ever actually fires — both
+  // are callbacks, not run during this script's own top-to-bottom
+  // execution) is where the Role used for `deleteNode`'s confirmation
+  // message comes from; vis-network's own dataset doesn't carry it.
+  function findNodeRole(id) {
+    const node = allNodes.find(function (n) { return n.id === id; });
+    return node ? node.role : undefined;
+  }
+
+  network.on('oncontext', function (params) {
+    params.event.preventDefault();
+    const nodeId = network.getNodeAt(params.pointer.DOM);
+    if (nodeId === undefined) return;
+    network.selectNodes([nodeId]);
+    deleteNode(nodeId, findNodeRole(nodeId));
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (diagramView.style.display === 'none') return;
+    if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+    const selected = network.getSelectedNodes();
+    if (selected.length === 0) return;
+    e.preventDefault();
+    deleteNode(selected[0], findNodeRole(selected[0]));
+  });
+
   function shorten(id) {
     return id.length > 12 ? id.slice(0, 8) + '…' : id;
+  }
+
+  // Shared by both the List view's delete button and the Diagram
+  // view's right-click/Delete-key handlers below — one confirmation +
+  // request path regardless of which view a Node is deleted from.
+  // The cascade-to-occurrences behavior itself is entirely host-side
+  // (see `delete-node`'s doc comment) — this just warns about it
+  // first, since there's no undo.
+  // Stand-in for `window.confirm` (see the `#confirm-overlay` CSS
+  // comment for why that doesn't work here) — resolves `true`/`false`
+  // the same way, just via a real in-page element instead of a native
+  // panel `wry` never shows.
+  let resolveConfirm = null;
+  const confirmOverlay = document.getElementById('confirm-overlay');
+  function showConfirm(message) {
+    document.getElementById('confirm-message').textContent = message;
+    confirmOverlay.style.display = 'flex';
+    return new Promise(function (resolve) { resolveConfirm = resolve; });
+  }
+  document.getElementById('confirm-cancel-btn').onclick = function () {
+    confirmOverlay.style.display = 'none';
+    if (resolveConfirm) resolveConfirm(false);
+  };
+  document.getElementById('confirm-ok-btn').onclick = function () {
+    confirmOverlay.style.display = 'none';
+    if (resolveConfirm) resolveConfirm(true);
+  };
+
+  function deleteNode(id, role) {
+    const message = role === 'entity'
+      ? 'Delete this entity and all of its occurrences? This cannot be undone.'
+      : 'Delete this occurrence? This cannot be undone.';
+    showConfirm(message).then(function (confirmed) {
+      if (!confirmed) return;
+      window.cefQuery({
+        request: windowId + ':delete:' + id,
+        onSuccess: function () {},
+        onFailure: function () {},
+      });
+    });
   }
 
   function cell(text, title) {
@@ -276,6 +394,89 @@ const PAGE: &str = r#"<!doctype html>
     });
   }
 
+  // `properties` arrives as a raw `key=value;key=value` string (see
+  // `poll_output` on the host side) — never parsed into a real object
+  // until now, since the List view just displays it verbatim. Values
+  // may themselves contain `=` (most property keys used so far are
+  // short, fixed names like `url`/`title`, never containing `=`
+  // themselves, so splitting on the *first* `=` only is enough).
+  function parseProperties(raw) {
+    const result = {};
+    (raw || '').split(';').filter(Boolean).forEach(function (pair) {
+      const i = pair.indexOf('=');
+      if (i === -1) return;
+      result[pair.slice(0, i)] = pair.slice(i + 1);
+    });
+    return result;
+  }
+
+  function truncate(text, maxLength) {
+    return text.length > maxLength ? text.slice(0, maxLength - 1) + '…' : text;
+  }
+
+  // A real page URL (especially a search results page, or anything
+  // else with query-string tracking params) can run to hundreds of
+  // characters — nowhere near usable as a diagram label. Dropping the
+  // query string/hash and keeping just host+path covers the vast
+  // majority of what actually distinguishes one page from another;
+  // the *full* url is still one hover away (see `visNodes.push`'s
+  // `title` field below), this is just the label text.
+  function shortenUrl(url) {
+    let host = url;
+    let path = '';
+    try {
+      const parsed = new URL(url);
+      host = parsed.hostname;
+      path = parsed.pathname === '/' ? '' : parsed.pathname;
+    } catch (e) {
+      // Not a real absolute URL (shouldn't happen for a `rashomon:page`
+      // Entity, but this is display code, not worth a thrown error
+      // over) — fall through to plain truncation of the whole string.
+      return truncate(url, 40);
+    }
+    return truncate(host + path, 40);
+  }
+
+  // Tried in order — whichever is present first wins. `url` covers
+  // `rashomon:page` Entities (see `rashomon-kernel`'s
+  // `record_page_visit`); `title`/`name` are here for any future
+  // Entity type that sets one, so this doesn't need revisiting every
+  // time a new kind of labeled Entity shows up.
+  const LABEL_PROPERTY_PRIORITY = ['url', 'title', 'name'];
+
+  function entityLabel(node) {
+    const props = parseProperties(node.properties);
+    if (props.url) return shortenUrl(props.url);
+    for (let i = 1; i < LABEL_PROPERTY_PRIORITY.length; i++) {
+      const value = props[LABEL_PROPERTY_PRIORITY[i]];
+      if (value) return truncate(value, 40);
+    }
+    return node.nodeType + '\n' + shorten(node.id);
+  }
+
+  // An Occurrence's own properties are rarely what identifies it to a
+  // human — what matters is *which Entity it's an occurrence of* (see
+  // the module doc comment's `occurrence-of` convention: the edge
+  // always points *from* the Occurrence *to* the Entity). Labeled as
+  // that Entity's own label, prefixed with `→`, rather than
+  // `nodeType`/id like an Entity gets — "→google.com" reads far better
+  // than "rashomon:page-visit\nab12cd34…". Falls back to the plain
+  // `nodeType`/id label if the Occurrence has no `occurrence-of` edge
+  // at all, or its target isn't in `allNodes` (both unexpected, but
+  // not worth a crash over).
+  function occurrenceLabel(node) {
+    const edge = allEdges.find(function (e) {
+      return e.edgeType === 'occurrence-of' && e.source === node.id;
+    });
+    const entity = edge && allNodes.find(function (n) { return n.id === edge.target; });
+    if (!entity) return node.nodeType + '\n' + shorten(node.id);
+    return '→ ' + entityLabel(entity);
+  }
+
+  function nodeLabel(node) {
+    return node.role === 'entity' ? entityLabel(node) : occurrenceLabel(node);
+  }
+
   function emptyRow(colSpan, text) {
     const row = document.createElement('tr');
     const td = document.createElement('td');
@@ -318,13 +519,26 @@ const PAGE: &str = r#"<!doctype html>
       roleCell.className = n.role;
       row.appendChild(roleCell);
       row.appendChild(cell(n.properties || ''));
+      const actionsCell = document.createElement('td');
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'delete-btn';
+      deleteBtn.textContent = '✕';
+      deleteBtn.title = 'Delete';
+      deleteBtn.onclick = function () { deleteNode(n.id, n.role); };
+      actionsCell.appendChild(deleteBtn);
+      row.appendChild(actionsCell);
       nodesBody.appendChild(row);
 
+      // The hover tooltip carries the *untruncated* url (falling back
+      // to the id) — `nodeLabel`'s text is deliberately shortened for
+      // display, so this is the only place the full value is still
+      // reachable without switching to the List view.
+      const fullUrl = parseProperties(n.properties).url;
       visNodes.push({
         id: n.id,
-        label: n.nodeType + '\n' + shorten(n.id),
+        label: nodeLabel(n),
         color: n.role === 'entity' ? '#7ec8ff' : '#ffcf7e',
-        title: n.id,
+        title: fullUrl ? fullUrl + '\n' + n.id : n.id,
       });
     });
 
@@ -340,7 +554,7 @@ const PAGE: &str = r#"<!doctype html>
     });
 
     if (visibleNodes.length === 0) {
-      nodesBody.appendChild(emptyRow(4, allNodes.length === 0 ? 'no nodes yet' : 'no nodes match the filter'));
+      nodesBody.appendChild(emptyRow(5, allNodes.length === 0 ? 'no nodes yet' : 'no nodes match the filter'));
     }
     if (visibleEdges.length === 0) {
       edgesBody.appendChild(emptyRow(4, allEdges.length === 0 ? 'no edges yet' : 'no edges match the filter'));

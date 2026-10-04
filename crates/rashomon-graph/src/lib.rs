@@ -53,6 +53,13 @@ pub trait GraphStore {
     fn all_nodes(&self) -> Vec<Node>;
     /// Every Edge that currently exists — same reasoning as `all_nodes`.
     fn all_edges(&self) -> Vec<Edge>;
+    /// Removes a Node and every Edge touching it (in either
+    /// direction). Returns `false` if `id` didn't exist. Deliberately
+    /// has no opinion on `Role`-based cascading (e.g. an Entity's
+    /// Occurrences) — that's a `rashomon:graph` domain convention, not
+    /// something this generic store should bake in; see
+    /// `rashomon-kernel`'s `delete_node` Host impl for that.
+    fn delete_node(&mut self, id: &str) -> bool;
 }
 
 #[derive(Debug, Default)]
@@ -114,6 +121,14 @@ impl GraphStore for InMemoryGraphStore {
 
     fn all_edges(&self) -> Vec<Edge> {
         self.edges.values().cloned().collect()
+    }
+
+    fn delete_node(&mut self, id: &str) -> bool {
+        if self.nodes.remove(id).is_none() {
+            return false;
+        }
+        self.edges.retain(|_, e| e.source != id && e.target != id);
+        true
     }
 }
 
@@ -189,6 +204,24 @@ impl PersistentGraphStore {
                 .expect("failed to persist edge");
         }
         write_txn.commit().expect("failed to commit edge write");
+    }
+
+    /// `edge_ids` must be every Edge touching `node_id` — leaving one
+    /// behind would panic the *next* time this file is `open`-ed: edge
+    /// replay looks up both endpoints' `NodeIndex` unconditionally
+    /// (see `open`), and a dangling edge's endpoint wouldn't exist
+    /// anymore.
+    fn persist_delete_node(&self, node_id: &str, edge_ids: &[String]) {
+        let write_txn = self.db.begin_write().expect("failed to begin redb write transaction");
+        {
+            let mut nodes_table = write_txn.open_table(NODES_TABLE).expect("failed to open nodes table");
+            nodes_table.remove(node_id).expect("failed to delete persisted node");
+            let mut edges_table = write_txn.open_table(EDGES_TABLE).expect("failed to open edges table");
+            for edge_id in edge_ids {
+                edges_table.remove(edge_id.as_str()).expect("failed to delete persisted edge");
+            }
+        }
+        write_txn.commit().expect("failed to commit node deletion");
     }
 }
 
@@ -268,6 +301,30 @@ impl GraphStore for PersistentGraphStore {
 
     fn all_edges(&self) -> Vec<Edge> {
         self.graph.edge_weights().cloned().collect()
+    }
+
+    fn delete_node(&mut self, id: &str) -> bool {
+        let Some(&idx) = self.node_index.get(id) else {
+            return false;
+        };
+
+        let touching_edge_ids: Vec<String> = self
+            .graph
+            .edges_directed(idx, Direction::Outgoing)
+            .chain(self.graph.edges_directed(idx, Direction::Incoming))
+            .map(|e| e.weight().id.clone())
+            .collect();
+
+        self.graph.remove_node(idx);
+        // `remove_node` moves the graph's *last* node into `idx`'s now-
+        // vacant slot, invalidating whatever `NodeIndex` that node was
+        // tracked under — rebuilding from scratch rather than patching
+        // just that one entry, since this is a rare, not-hot-path
+        // operation and a full rebuild can't get this subtlety wrong.
+        self.node_index = self.graph.node_indices().map(|i| (self.graph[i].id.clone(), i)).collect();
+
+        self.persist_delete_node(id, &touching_edge_ids);
+        true
     }
 }
 
@@ -414,5 +471,50 @@ mod tests {
             .map(|e| e.id)
             .collect();
         assert_eq!(edges_to_node, vec![edge_id]);
+    }
+
+    #[test]
+    fn delete_node_removes_touching_edges() {
+        let mut store = InMemoryGraphStore::new();
+        let a = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+        let b = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+        let c = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+        store.create_edge("references", &a.id, &b.id, 1.0);
+        store.create_edge("references", &c.id, &a.id, 1.0);
+        // Untouched by deleting `a` — should survive.
+        let bc = store.create_edge("references", &b.id, &c.id, 1.0);
+
+        assert!(store.delete_node(&a.id));
+        assert_eq!(store.get_node(&a.id), None);
+        assert!(store.query_edges_from(&a.id).is_empty());
+        assert!(store.query_edges_to(&a.id).is_empty());
+        assert_eq!(store.all_edges().into_iter().map(|e| e.id).collect::<Vec<_>>(), vec![bc.id]);
+
+        assert!(!store.delete_node(&a.id), "deleting an already-deleted node should report false");
+    }
+
+    #[test]
+    fn persistent_delete_node_survives_reopen() {
+        let path = temp_db_path();
+
+        let (a_id, b_id, bc_id) = {
+            let mut store = PersistentGraphStore::open(&path);
+            let a = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+            let b = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+            let c = store.create_node("rashomon:page", Role::Entity, HashMap::new());
+            store.create_edge("references", &a.id, &b.id, 1.0);
+            let bc = store.create_edge("references", &b.id, &c.id, 1.0);
+
+            assert!(store.delete_node(&a.id));
+            (a.id, b.id, bc.id)
+        };
+        // Reopening must not panic replaying an edge whose endpoint no
+        // longer exists (the whole reason persisted edges touching a
+        // deleted node have to be removed too, not just the node row).
+
+        let reopened = PersistentGraphStore::open(&path);
+        assert_eq!(reopened.get_node(&a_id), None);
+        assert!(reopened.get_node(&b_id).is_some());
+        assert_eq!(reopened.all_edges().into_iter().map(|e| e.id).collect::<Vec<_>>(), vec![bc_id]);
     }
 }

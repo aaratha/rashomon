@@ -6,8 +6,6 @@ use std::cell::RefCell;
 use bindings::exports::rashomon::facet::contract::Guest;
 use bindings::rashomon::browser::control;
 use bindings::rashomon::browser::types::{BrowserContext, BrowserTab};
-use bindings::rashomon::graph::store;
-use bindings::rashomon::graph::types::{Property, Role};
 
 /// The two starter tabs this demo opens — the exact pair
 /// `cef-extension-spike` used to validate tab switching.
@@ -32,29 +30,20 @@ struct Component;
 impl Guest for Component {
     /// On first call, opens one `browser-tab` per starter URL — the
     /// host mounts/switches between them in its own native switcher
-    /// window (see `rashomon-kernel`'s `BrowserSwitcherState`) — and
-    /// records each as a `rashomon:page` Occurrence attached to
-    /// `node_id`, per the design doc's own "tabs are identified by
-    /// their url, which is added to the graph" rule. There's no
-    /// interactive HTML surface here; the real UI is the native
-    /// switcher window the host builds, not a Facet page.
-    fn render(node_id: String) -> String {
+    /// window (see `rashomon-kernel`'s `BrowserSwitcherState`). Graph
+    /// tracking for each tab's URL (finding or creating its
+    /// `rashomon:page` Entity, then recording an Occurrence for
+    /// further navigations) is entirely the host's own job now —
+    /// `rashomon-kernel`'s `TabDisplayHandler::on_address_change`
+    /// handles it for every real browser tab uniformly, these two
+    /// starter tabs included, not just ones a Facet happens to record
+    /// by hand. There's no interactive HTML surface here; the real UI
+    /// is the native switcher window the host builds, not a Facet page.
+    fn render(_node_id: String) -> String {
         SESSION.with_borrow_mut(|session| {
             if session.is_none() {
                 let context = control::create_context();
-                let mut tabs = Vec::new();
-                for url in STARTER_URLS {
-                    let tab = control::create_tab(&context, url);
-
-                    let occurrence = store::create_node(
-                        "rashomon:page",
-                        Role::Occurrence,
-                        &[Property { key: "url".to_string(), value: url.to_string() }],
-                    );
-                    store::create_edge("occurrence-of", &occurrence.id, &node_id, 1.0);
-
-                    tabs.push(tab);
-                }
+                let tabs = STARTER_URLS.iter().map(|url| control::create_tab(&context, url)).collect();
                 *session = Some(Session { context, tabs });
             }
 

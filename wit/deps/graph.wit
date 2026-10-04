@@ -58,4 +58,13 @@ interface store {
     list-nodes: func() -> list<node>;
     /// Every Edge that currently exists — same reasoning as `list-nodes`.
     list-edges: func() -> list<edge>;
+    /// Deletes a Node and every Edge touching it. Deleting an `entity`
+    /// Node cascades: every `occurrence` Node connected to it via an
+    /// `occurrence-of` Edge is deleted too (an Occurrence has no
+    /// identity of its own apart from the Entity it's an occurrence
+    /// of, so leaving it behind orphaned would be more confusing than
+    /// useful) — deleting an `occurrence` Node directly does not
+    /// cascade back up to its Entity. Returns `false` if `id` didn't
+    /// exist.
+    delete-node: func(id: string) -> bool;
 }
