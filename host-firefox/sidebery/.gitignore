@@ -1,0 +1,13 @@
+.cache
+.vscode
+dist
+node_modules
+coverage
+addon
+build/*
+!build/*.ts
+!build/*.js
+!build/*.mjs
+/.devenv/
+/.direnv/
+.idea

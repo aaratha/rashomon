@@ -1,0 +1,180 @@
+import { SettingsState, Stored, CopyTemplate, Reactivator } from 'src/types'
+import { DEFAULT_SETTINGS } from 'src/defaults'
+import * as Utils from 'src/utils'
+import * as Info from 'src/services/info'
+import * as Logs from 'src/services/logs'
+
+export let state = Utils.clone(DEFAULT_SETTINGS)
+
+export let updateWinPrefaceOnPanelSwitch = false
+export let initSaveNeeded = false
+export let copyTemplates: CopyTemplate[] = []
+
+export let newTabBarPositionAfterTabs = false
+export let newTabBarPositionBottom = false
+
+export let rmChildTabsFolded = false
+export let rmChildTabsAll = false
+export let rmChildTabsNone = false
+
+export let activateAfterClosingNone = false
+export let activateAfterClosingNext = false
+export let activateAfterClosingPrev = false
+export let activateAfterClosingPrevAct = false
+
+export let stickyTabs = false
+export let stickyAncestorTabsLimit = 16
+export let stickyAncestorTabsLayoutCol = false
+export let stickyAncestorTabsLayoutRow = false
+
+export let tabsMultiLineTitle = false
+export let tabsTitleLinesMax = 1
+
+export function reactivate(r: Reactivator<SettingsState>) {
+  state = r(state)
+}
+
+export async function load(): Promise<void> {
+  const [managedResult, localResult] = await Promise.allSettled([
+    browser.storage.managed.get<Stored>('settings'),
+    browser.storage.local.get<Stored>('settings'),
+  ])
+
+  const storedManaged = Utils.settledOr(managedResult, {} as Stored)
+  if (!storedManaged.settings) storedManaged.settings = {} as SettingsState
+
+  const storedLocal = Utils.settledOr(localResult, {} as Stored)
+  if (!storedLocal.settings) {
+    // Respect prefersReducedMotion rule for default settings
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+    if (prefersReducedMotion?.matches) DEFAULT_SETTINGS.animations = false
+
+    storedLocal.settings = {} as SettingsState
+  }
+
+  Utils.normalizeObject(storedManaged.settings, storedLocal.settings)
+  const tabsUpdateMark = storedManaged.settings.tabsUpdateMark
+  const groupOnOpen = storedManaged.settings.groupOnOpen
+  Utils.normalizeObject(storedManaged.settings, DEFAULT_SETTINGS)
+  Utils.updateObject(state, storedManaged.settings, state)
+
+  if (state.hideInact) {
+    state.activateLastTabOnPanelSwitching = true
+    state.tabsPanelSwitchActMove = true
+  }
+
+  // TMP
+  // Try to keep previous behavior with moveNewTabParent === 'default' and groupOnOpen
+  if (groupOnOpen && state.moveNewTabParent === 'default') {
+    state.moveNewTabParentIndent = true
+  }
+
+  // TMP
+  // Handle deprecated tabsUpdateMark
+  if (tabsUpdateMark !== undefined) {
+    if (tabsUpdateMark === 'none') {
+      state.tabsBadge = false
+    } else if (tabsUpdateMark === 'norm') {
+      state.tabsBadgeRules = state.tabsBadgeRules.replace(
+        'minUrlAge:5000; urgent',
+        'minUrlAge:5000; urgent; normal'
+      )
+    } else if (tabsUpdateMark === 'pin') {
+      state.tabsBadgeRules = state.tabsBadgeRules.replace(
+        'minUrlAge:5000; urgent',
+        'minUrlAge:5000; urgent; pinned'
+      )
+    }
+    state.tabsUpdateMark = undefined
+    state.tabsUpdateMarkFirst = undefined
+    initSaveNeeded = true
+  }
+
+  // TMP
+  // Handle removed 'window' tab preview option
+  if ((state.previewTabsMode as any) === 'w') {
+    state.previewTabsMode = 'p'
+    initSaveNeeded = true
+  }
+  if ((state.previewTabsPageModeFallback as any) === 'w') {
+    state.previewTabsPageModeFallback = 'i'
+    initSaveNeeded = true
+  }
+
+  parsePrefaceTemplate()
+
+  if (Info.isSidebar) {
+    parseCopyTemplates()
+  }
+
+  updPrecalcSettings()
+}
+
+export function updPrecalcSettings() {
+  newTabBarPositionAfterTabs = state.showNewTabBtns && state.newTabBarPosition === 'after_tabs'
+  newTabBarPositionBottom = state.showNewTabBtns && state.newTabBarPosition === 'bottom'
+
+  rmChildTabsFolded = state.rmChildTabs === 'folded'
+  rmChildTabsAll = state.rmChildTabs === 'all'
+  rmChildTabsNone = state.rmChildTabs === 'none'
+
+  activateAfterClosingNone = state.activateAfterClosing === 'none'
+  activateAfterClosingNext = state.activateAfterClosing === 'next'
+  activateAfterClosingPrev = state.activateAfterClosing === 'prev'
+  activateAfterClosingPrevAct = state.activateAfterClosing === 'prev_act'
+
+  stickyTabs = state.stickyActiveTab || (state.tabsTree && state.stickyAncestorTabs)
+  if (state.tabsTree && state.stickyAncestorTabs) {
+    stickyAncestorTabsLimit =
+      typeof state.stickyAncestorTabsLimit === 'number' ? state.stickyAncestorTabsLimit : 16
+  } else {
+    stickyAncestorTabsLimit = 0
+  }
+  stickyAncestorTabsLayoutCol = state.stickyAncestorTabsLayout === 'col'
+  stickyAncestorTabsLayoutRow = state.stickyAncestorTabsLayout === 'row'
+
+  tabsTitleLinesMax = state.tabsTitleLinesMax
+  if (tabsTitleLinesMax < 1) tabsTitleLinesMax = 1
+  tabsMultiLineTitle = tabsTitleLinesMax > 1
+}
+
+export function resetSettings(): void {
+  Utils.updateObject(state, DEFAULT_SETTINGS, DEFAULT_SETTINGS)
+  updPrecalcSettings()
+}
+
+export function parsePrefaceTemplate() {
+  const preface = state.markWindowPreface
+  updateWinPrefaceOnPanelSwitch = preface.includes('%PN')
+}
+
+const COPY_TEMPLATE_RE = /^(?<name>.+):(?<template>.+)$/
+export function parseCopyTemplates() {
+  const templates: CopyTemplate[] = []
+
+  if (state.copyTemplates) {
+    const rawLines = state.copyTemplates.split('\n')
+    for (const rawLine of rawLines) {
+      const line = rawLine.trim()
+      if (!line) continue
+
+      const result = COPY_TEMPLATE_RE.exec(line)
+      if (!result?.groups) continue
+
+      const name = result.groups['name']
+      const template = result.groups['template']
+      if (!name || !template) continue
+
+      templates.push({
+        name,
+        str: template,
+        hasCT: template.includes('%CT'),
+        hasT: template.includes('%T'),
+        hasU: template.includes('%U'),
+        hasB: template.includes('%B'),
+      })
+    }
+  }
+
+  copyTemplates = templates
+}

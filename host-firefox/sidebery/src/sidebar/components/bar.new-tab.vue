@@ -1,0 +1,425 @@
+<template lang="pug">
+.new-tab-btns(
+  ref="ntbbEl"
+  tabindex="-1"
+  :data-new-tab-bar-position="Settings.state.newTabBarPosition"
+  :data-sel="panel.reactive.selNewTab")
+  StickyTabs.-bottom(:stickyTabIds="panel.reactive.stickyTabIdsBottom")
+  .new-tab-btn(
+    :title="defaultBtn.tooltip"
+    :data-container-color="defaultBtn.containerId && Containers.reactive.byId[defaultBtn.containerId]?.color"
+    @mousedown="onNewTabMouseDown($event, defaultBtn)"
+    @mouseup="onNewTabMouseUp($event, defaultBtn)"
+    @dragstart="onDragStart($event, defaultBtn)"
+    @contextmenu="onNewTabCtxMenu")
+    .dnd-layer(draggable="true")
+    svg(:class="{ '-icon': !!defaultBtn.containerId }")
+      use(:href="defaultBtn.icon")
+    svg.-badge(v-if="defaultBtn.containerId")
+      use(href="#icon_plus_badge")
+  .new-tab-btn.-custom(
+    v-for="btn of btns"
+    :title="btn.tooltip"
+    :data-br="!btn.title"
+    :data-wide="btn.wide"
+    :data-container-color="btn.containerId && Containers.reactive.byId[btn.containerId]?.color"
+    @mousedown="onNewTabMouseDown($event, btn)"
+    @mouseup="onNewTabMouseUp($event, btn)"
+    @dragstart="onDragStart($event, btn)"
+    @contextmenu="onNewTabCtxMenu")
+    .dnd-layer(draggable="true")
+    svg.-icon(v-if="!btn.domain && btn.containerId")
+      use(:href="btn.icon")
+    svg.-icon(v-else-if="btn.icon && btn.icon[0] === '#'")
+      use(:href="btn.icon")
+    img.-icon(v-else-if="btn.icon" :src="btn.icon")
+    svg.-badge: use(href="#icon_plus_badge")
+</template>
+
+<script lang="ts" setup>
+import type { PropType } from 'vue'
+import { computed, onMounted, useTemplateRef } from 'vue'
+import type { DragInfo, Container, DstPlaceInfo, ItemInfo, Tab, TabsPanel } from 'src/types'
+import { MenuType, DragType, DropType } from 'src/enums'
+import * as D from 'src/defaults'
+import { translate } from 'src/dict'
+import * as Utils from 'src/utils'
+import * as Settings from 'src/services/settings'
+import * as Selection from 'src/services/selection.fg'
+import * as Menu from 'src/services/menu.fg'
+import * as Tabs from 'src/services/tabs.fg'
+import * as Mouse from 'src/services/mouse.fg'
+import * as Containers from 'src/services/containers'
+import * as Favicons from 'src/services/favicons.fg'
+import * as Logs from 'src/services/logs'
+import * as IPC from 'src/services/ipc'
+import * as Windows from 'src/services/windows.fg'
+import * as DnD from 'src/services/drag-and-drop.fg'
+import * as Sidebar from 'src/services/sidebar.fg'
+import StickyTabs from 'src/sidebar/components/sticky-tabs.vue'
+
+interface NewTabBtn {
+  id: string
+  wide?: boolean
+  title?: string
+  icon?: string
+  containerId?: string
+  containerName?: string
+  url?: string
+  domain?: string
+  children?: NewTabBtn[]
+  tooltip?: string
+}
+
+const props = defineProps({
+  panel: { type: Object as PropType<TabsPanel>, required: true },
+})
+
+const ntbbEl = useTemplateRef('ntbbEl')
+
+const defaultBtn = computed<NewTabBtn>(() => {
+  const btn: NewTabBtn = { id: 'default' }
+
+  const contianer = Containers.reactive.byId[props.panel.reactive.newTabCtx]
+  if (contianer && !Windows.incognito) {
+    btn.containerId = contianer.id
+    btn.containerName = contianer.name
+    btn.icon = '#' + contianer.icon
+  } else {
+    btn.icon = '#icon_plus'
+  }
+
+  btn.tooltip = createTooltip(btn)
+
+  return btn
+})
+
+const btns = computed<NewTabBtn[]>(() => {
+  const btns: NewTabBtn[] = []
+  const ids: Record<string, string> = {}
+  const rawBtns = props.panel.reactive.newTabBtns
+  let container: Container | undefined
+  let afterSep = false
+
+  for (const conf of rawBtns) {
+    if (conf === '') {
+      btns.push({ id: '' })
+      if (!afterSep) afterSep = true
+      continue
+    }
+
+    if (ids[conf]) continue
+    ids[conf] = conf
+    container = undefined
+
+    const btn: NewTabBtn = { id: conf }
+    const parts: string[] = conf.split(',')
+
+    if (afterSep) btn.wide = true
+
+    for (let part of parts) {
+      part = part.trim()
+
+      // Url?
+      const domain = D.HOSTNAME_RE.exec(part)?.[1]
+      if (domain) {
+        btn.url = part
+        btn.domain = domain
+        btn.title = btn.url
+        continue
+      }
+
+      // Container?
+      if (!container) {
+        if (part === D.DEFAULT_CONTAINER_ID) {
+          btn.containerId = D.CONTAINER_ID
+          btn.containerName = translate('newTabBar.default_container_name')
+          if (!btn.title) btn.title = btn.containerName
+        } else {
+          container = Object.values(Containers.reactive.byId).find(c => c.name === part)
+          if (container && !Windows.incognito) {
+            btn.containerId = container.id
+            btn.containerName = container.name
+            if (!btn.title) btn.title = container.name
+            continue
+          }
+        }
+      }
+    }
+
+    if (btn.domain) btn.icon = Favicons.reactive.byDomains[btn.domain]
+    if (!btn.icon && btn.url) btn.icon = Favicons.getFavPlaceholder(btn.url)
+    if (!btn.icon && container) btn.icon = '#' + container.icon
+    if (!btn.icon && btn.containerId === D.CONTAINER_ID) btn.icon = '#icon_ff'
+
+    btn.tooltip = createTooltip(btn)
+
+    if (btn.title) btns.push(btn)
+  }
+
+  return btns
+})
+
+onMounted(() => {
+  if (ntbbEl.value) {
+    ntbbEl.value.__sdbr_ntbb = true
+    props.panel.ntbbEl = ntbbEl.value
+  }
+})
+
+function createTooltip(btn: NewTabBtn): string {
+  const newTabMiddleClickOpenNewChild = Settings.state.newTabMiddleClickAction === 'new_child'
+  let tooltip = null
+
+  if (btn.containerName) {
+    if (btn.url) {
+      tooltip =
+        translate('newTabBar.new_tab_in_container_with_url', btn.url, btn.containerName) + '\n'
+      tooltip += translate(
+        newTabMiddleClickOpenNewChild
+          ? 'newTabBar.open_child_tab_in_container_with_url'
+          : 'newTabBar.middle_click_reopen_active_tab_in_container_with_url',
+        btn.url,
+        btn.containerName
+      )
+    } else {
+      tooltip = translate('newTabBar.new_tab_in_container', btn.containerName) + '\n'
+      tooltip += translate(
+        newTabMiddleClickOpenNewChild
+          ? 'newTabBar.open_child_tab_in_container'
+          : 'newTabBar.middle_click_reopen_active_tab_in_container',
+        btn.containerName
+      )
+    }
+  } else {
+    if (btn.url) {
+      tooltip = translate('newTabBar.new_tab_in_default_container_with_url', btn.url) + '\n'
+      tooltip += translate(
+        newTabMiddleClickOpenNewChild
+          ? 'newTabBar.open_child_tab_with_url'
+          : 'newTabBar.middle_click_reload_active_tab_with_url',
+        btn.url
+      )
+    } else {
+      tooltip = translate('newTabBar.new_tab') + '\n'
+      tooltip += translate(
+        newTabMiddleClickOpenNewChild
+          ? 'newTabBar.open_child_tab'
+          : 'newTabBar.middle_click_reopen_active_tab_in_default_container'
+      )
+    }
+  }
+
+  return tooltip
+}
+
+function onNewTabMouseDown(e: MouseEvent, btn?: NewTabBtn): void {
+  e.stopPropagation()
+  Mouse.setTarget('tab.new', 'tab.new')
+  Menu.close()
+
+  // Middle
+  if (e.button === 1) {
+    e.preventDefault()
+    Mouse.blockWheel()
+  }
+
+  // Right
+  else if (e.button === 2) {
+    if (!Settings.state.ctxMenuNative && !props.panel.selNewTab) Selection.resetSelection()
+  }
+}
+
+function onNewTabMouseUp(e: MouseEvent, btn?: NewTabBtn): void {
+  // Show menu for selected tabs
+  if (Selection.isSet() && Mouse.isTarget('tab')) return
+
+  e.stopPropagation()
+
+  const sameTarget = Mouse.isTarget('tab.new', 'tab.new')
+  Mouse.resetTarget()
+  Mouse.stopLongClick()
+
+  if (!sameTarget) {
+    Mouse.stopMultiSelection()
+    Selection.resetSelection()
+    return
+  }
+
+  const newTabConf = { url: btn?.url, cookieStoreId: btn?.containerId, fromNewTabButton: true }
+
+  // Left
+  if (e.button === 0) {
+    if (e.ctrlKey) {
+      Mouse.blockWheel()
+      const actTab = Tabs.byId[Tabs.activeId]
+      if (actTab && !actTab.pinned && actTab.panelId === props.panel.id) {
+        Tabs.createChildTab(actTab.id, btn?.url, btn?.containerId)
+      } else {
+        Tabs.createTabInPanel(props.panel, newTabConf)
+      }
+      return
+    }
+
+    if (e.altKey) {
+      applyBtnRules(btn)
+      return
+    }
+
+    if (Selection.isSet() && !props.panel.selNewTab) Selection.resetSelection()
+
+    Tabs.createTabInPanel(props.panel, newTabConf)
+  }
+
+  // Middle
+  else if (e.button === 1) {
+    if (Settings.state.newTabMiddleClickAction === 'new_child') {
+      const actTab = Tabs.byId[Tabs.activeId]
+      if (actTab && !actTab.pinned && actTab.panelId === props.panel.id) {
+        Tabs.createChildTab(actTab.id, btn?.url, btn?.containerId)
+      } else {
+        Tabs.createTabInPanel(props.panel, newTabConf)
+      }
+    } else if (Settings.state.newTabMiddleClickAction === 'reopen') {
+      applyBtnRules(btn)
+    }
+  }
+
+  // Right
+  else if (e.button === 2) {
+    if (e.ctrlKey || e.shiftKey || Windows.incognito) return
+
+    if (Menu.isBlocked()) return
+    if (!Selection.isSet() && !Settings.state.ctxMenuNative) {
+      Selection.selectNewTabBtn(props.panel.id)
+    }
+    if (!Settings.state.ctxMenuNative) Menu.open(MenuType.NewTab, e.clientX, e.clientY)
+  }
+}
+
+function onNewTabCtxMenu(e: MouseEvent): void {
+  const sameTarget = Mouse.isCtxTarget('tab.new')
+  Mouse.resetCtxTarget()
+  if (!sameTarget) {
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+
+  // Do not show menu if browser window is private
+  if (Windows.incognito) {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
+
+  e.stopPropagation()
+
+  if (Mouse.isLocked() || !Settings.state.ctxMenuNative || e.ctrlKey || e.shiftKey) {
+    Mouse.resetClickLock()
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+
+  if (!e.ctrlKey && !e.shiftKey && !props.panel.selNewTab) {
+    Selection.resetSelection()
+  }
+
+  if (Menu.isBlocked()) {
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+
+  let nativeCtx = { showDefaults: false }
+  browser.menus.overrideContext(nativeCtx)
+
+  if (!Selection.isSet()) Selection.selectNewTabBtn(props.panel.id)
+
+  Menu.open(MenuType.NewTab)
+}
+
+async function applyBtnRules(btn?: NewTabBtn): Promise<void> {
+  let targetTabs: Tab[] = []
+  if (Selection.isTabs()) {
+    const ids = Selection.ids()
+    for (const tab of Tabs.list) {
+      if (ids.includes(tab.id)) targetTabs.push(tab)
+    }
+  } else {
+    const activeTab = Tabs.byId[Tabs.activeId]
+    if (activeTab) targetTabs.push(activeTab)
+  }
+
+  if (Selection.isSet()) Selection.resetSelection()
+
+  if (!targetTabs.length) return
+  if (targetTabs.some(t => t.panelId !== props.panel.id)) return
+
+  const targetContainerId =
+    btn?.id === 'default' ? (btn?.containerId ?? D.CONTAINER_ID) : btn?.containerId
+  const toReopen: ItemInfo[] = []
+  for (const tab of targetTabs) {
+    // Updating url
+    if ((!targetContainerId || tab.cookieStoreId === targetContainerId) && btn?.url) {
+      await browser.tabs.update(tab.id, { url: btn.url })
+    }
+    // Reopening tab
+    else if (targetContainerId && tab.cookieStoreId !== targetContainerId) {
+      const info: ItemInfo = Utils.clone(tab)
+      if (btn?.url) info.url = btn.url
+      else if (info.url === 'about:blank' && tab.title && D.INITIAL_TITLE_RE.test(tab.title)) {
+        info.url = 'https://' + tab.title
+      }
+      if (info.url === 'about:blank') info.url = 'about:newtab'
+      toReopen.push(info)
+    }
+  }
+
+  if (targetContainerId && toReopen.length > 0) {
+    const dst: DstPlaceInfo = {
+      containerId: targetContainerId,
+      panelId: props.panel.id,
+    }
+
+    const idsMap: Record<ID, ID> = {}
+    IPC.bg('disableAutoReopening', targetContainerId, 1000)
+
+    try {
+      await Tabs.reopen(toReopen, dst, idsMap)
+    } catch (err) {
+      Logs.err('NewTabBar: Cannot reopen tabs', err)
+    }
+
+    IPC.bg('enableAutoReopening', Object.values(idsMap))
+  }
+}
+
+function onDragStart(e: DragEvent, btn: NewTabBtn): void {
+  Menu.close()
+  Selection.resetSelection()
+  Sidebar.updateBounds()
+
+  const dragInfo: DragInfo = {
+    type: DragType.NewTab,
+    items: [{ id: D.NEWID, container: btn.containerId, title: 'New tab', url: btn.url }],
+    windowId: Windows.id,
+    incognito: Windows.incognito,
+    pinnedTabs: false,
+    x: e.clientX,
+    y: e.clientY,
+  }
+
+  DnD.broadcastDragInfo(dragInfo)
+  DnD.start(dragInfo, DropType.Tabs)
+
+  // Set native drag info
+  if (e.dataTransfer) {
+    e.dataTransfer.setData('application/x-sidebery-dnd', JSON.stringify(dragInfo))
+    const dragImgEl = document.getElementById('drag_image')
+    if (dragImgEl) e.dataTransfer.setDragImage(dragImgEl, -3, -3)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+}
+</script>

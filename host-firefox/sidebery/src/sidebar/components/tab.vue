@@ -1,0 +1,837 @@
+<template lang="pug">
+.Tab(
+  ref="tabEl"
+  :id="(sticky ? 'stickytab' : 'tab') + tab.id"
+  :data-pin="!!iconOnly"
+  :data-active="tab.reactive.active"
+  :data-loading="tab.reactive.status === TabStatus.Loading"
+  :data-pending="tab.reactive.status === TabStatus.Pending"
+  :data-selected="tab.reactive.sel"
+  :data-locked-selection="tab.reactive.selLock"
+  :data-audible="tab.reactive.mediaAudible"
+  :data-muted="tab.reactive.mediaMuted"
+  :data-paused="tab.reactive.mediaPaused"
+  :data-discarded="tab.reactive.discarded"
+  :data-urgent-descendant="tab.reactive.hasUrgentDescendant"
+  :data-lvl="tab.reactive.lvl"
+  :data-group="tab.reactive.isGroup"
+  :data-parent="tab.reactive.isParent"
+  :data-folded="tab.reactive.folded"
+  :data-container-color="tab.reactive.containerColor"
+  :data-colorized="!!tabColor"
+  :data-unread="tab.reactive.unread"
+  :data-edit="tab.reactive.customTitleEdit"
+  :title="tab.reactive.tooltip"
+  :draggable="!tab.reactive.customTitleEdit"
+  @dragstart="onDragStart"
+  @contextmenu.stop="onCtxMenu"
+  @mousedown.stop="onMouseDown"
+  @mouseup.stop="onMouseUp"
+  @mouseenter.stop="onMouseEnter"
+  @mouseleave="onMouseLeave"
+  @dblclick.prevent.stop="onDoubleClick")
+  .dnd-layer(v-once data-dnd-type="tab" :data-dnd-id="tab.id")
+  .body
+    .color-layer(v-if="tabColor" :style="{ '--tab-color': tabColor }")
+    .flash-fx(ref="flashFxEl")
+    .unread-mark(v-if="tab.reactive.unread")
+    .main-row
+      .fav(@dragstart.stop.prevent)
+        img.fav-icon(ref="favImgEl" @error="onImgFavError" draggable="false")
+        svg.fav-icon: use(ref="favSvgUseEl" href="#icon_ff")
+        .exp(
+          v-if="tab.reactive.isParent"
+          @dblclick.prevent.stop
+          @mousedown.stop="onExpandMouseDown"
+          @mouseup="onExpandMouseUp")
+          svg.exp-icon: use(href="#icon_expand")
+        .badge(
+          v-if="tab.reactive.badge || tab.reactive.badgeUrgent"
+          :data-urgent="tab.reactive.badgeUrgent"
+          :style="{ '--bg': tab.reactive.badgeBg ?? '', '--fg': tab.reactive.badgeFg ?? '' }")
+          template(v-if="tab.reactive.badge !== true") {{tab.reactive.badge}}
+        .pending-mark
+        .progress-spinner(v-if="Settings.state.animations")
+        svg.progress-spinner(v-else): use(href="#icon_hourglass")
+        .child-count(v-if="tab.reactive.folded && tab.reactive.branchLen") {{tab.reactive.branchLen}}
+      .audio(
+        v-if="tab.reactive.mediaAudible || tab.reactive.mediaMuted || tab.reactive.mediaPaused"
+        @mousedown.stop.prevent="onAudioMouseDown($event, tab)"
+        @mouseup.stop="onAudioMouseUp($event, tab)")
+        svg.audio-icon.-loud: use(href="#icon_loud_badge")
+        svg.audio-icon.-mute: use(href="#icon_mute_badge")
+        svg.audio-icon.-pause: use(href="#icon_pause_12")
+      .t-box(v-if="!iconOnly")
+        template(v-if="tab.reactive.customTitleEdit")
+          input.custom-title-input(
+            v-if="!Settings.tabsMultiLineTitle"
+            :value="tab.customTitle"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            tabindex="-1"
+            @blur="onCustomTitleBlur"
+            @keydown="onCustomTitlteKD")
+          textarea.custom-title-input(
+            v-else
+            :value="tab.customTitle"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            tabindex="-1"
+            @scroll.passive="onCustomTitleScroll"
+            @blur="onCustomTitleBlur"
+            @keydown="onCustomTitlteKD")
+        .title(ref="titleEl") {{tab.customTitle ?? tab.title}}
+    .close(
+      v-if="!iconOnly && Settings.state.tabRmBtn !== 'none'"
+      draggable="true"
+      @dragstart.stop.prevent
+      @mousedown.stop="onMouseDownClose"
+      @mouseup.stop="onMouseUpClose"
+      @contextmenu.stop.prevent)
+      svg.close-icon: use(href="#icon_remove")
+    .ctx(v-once v-if="tab.reactive.containerColor")
+</template>
+
+<script lang="ts" setup>
+import { computed, onMounted, useTemplateRef, onUnmounted } from 'vue'
+import type { DragInfo, DragItem, Tab } from 'src/types'
+import { TabStatus, DragType, DropType, MenuType } from 'src/enums'
+import * as Settings from 'src/services/settings'
+import * as Windows from 'src/services/windows.fg'
+import * as Selection from 'src/services/selection.fg'
+import * as Menu from 'src/services/menu.fg'
+import * as Sidebar from 'src/services/sidebar.fg'
+import * as Tabs from 'src/services/tabs.fg'
+import * as Mouse from 'src/services/mouse.fg'
+import * as DnD from 'src/services/drag-and-drop.fg'
+import * as Search from 'src/services/search.fg'
+import { NOID, RGB_COLORS } from 'src/defaults'
+import * as Utils from 'src/utils'
+import * as Logs from 'src/services/logs'
+import * as Preview from 'src/services/tabs.fg.preview'
+
+const props = defineProps<{ tabId: ID; sticky?: boolean }>()
+const tab = Tabs.byId[props.tabId] as Tab
+const iconOnly =
+  tab.pinned &&
+  (!Settings.state.pinnedTabsList ||
+    Settings.state.pinnedTabsPosition === 'left' ||
+    Settings.state.pinnedTabsPosition === 'right')
+
+const tabEl = useTemplateRef('tabEl')
+const titleEl = useTemplateRef('titleEl')
+const favImgEl = useTemplateRef('favImgEl')
+const favSvgUseEl = useTemplateRef('favSvgUseEl')
+const flashFxEl = useTemplateRef('flashFxEl')
+
+const tabColor = computed<string>(() => {
+  if (tab.reactive.customColor) return RGB_COLORS[tab.customColor as string]
+  if (
+    Settings.state.colorizeTabsBranches &&
+    tab.reactive.branchColor &&
+    (tab.reactive.isParent || tab.reactive.lvl > 0)
+  ) {
+    return tab.reactive.branchColor
+  } else if (Settings.state.colorizeTabs && tab.reactive.color) {
+    return tab.reactive.color
+  } else {
+    return ''
+  }
+})
+
+onMounted(() => {
+  if (props.sticky) {
+    if (titleEl.value) tab.stickyTitleEl = titleEl.value
+    if (favImgEl.value) tab.stickyFavImgEl = favImgEl.value
+    if (favSvgUseEl.value) tab.stickyFavSvgUseEl = favSvgUseEl.value
+    if (flashFxEl.value) tab.stickyFlashFxEl = flashFxEl.value
+    if (tab.url !== 'about:blank') Tabs.renderStickyFavicon(tab, false)
+    return
+  }
+
+  if (titleEl.value) tab.titleEl = titleEl.value
+  if (favImgEl.value) tab.favImgEl = favImgEl.value
+  if (favSvgUseEl.value) tab.favSvgUseEl = favSvgUseEl.value
+  if (flashFxEl.value) tab.flashFxEl = flashFxEl.value
+
+  if (tab.url !== 'about:blank') {
+    Tabs.renderFavicon(tab)
+  }
+  if (!props.sticky) {
+    tab.el = tabEl.value ?? undefined
+    if (tab.el) tab.el.__sdbr_tabId = tab.id
+  }
+
+  if (!Sidebar.tabMinHeight) Sidebar.recalcMinTabHeight()
+})
+
+onUnmounted(() => {
+  if (props.sticky) {
+    tab.stickyTitleEl = undefined
+    tab.stickyFavImgEl = undefined
+    tab.stickyFavSvgUseEl = undefined
+    tab.stickyFlashFxEl = undefined
+  }
+})
+
+function shouldBeConvertedToGroup(): boolean {
+  return (
+    tab.isParent &&
+    !tab.folded &&
+    !tab.isGroup &&
+    Settings.state.autoGroupOnClose &&
+    (tab.lvl === 0 || !Settings.state.autoGroupOnClose0Lvl)
+  )
+}
+
+function convertToGroup() {
+  browser.tabs.update(tab.id, { url: Utils.createGroupUrl(tab.title) }).catch(() => {})
+}
+
+let closeLock = false
+let tempLockCloseBtnTimeout: number | undefined
+function tempLockCloseBtn(): void {
+  closeLock = true
+  clearTimeout(tempLockCloseBtnTimeout)
+  tempLockCloseBtnTimeout = setTimeout(() => {
+    closeLock = false
+  }, 100)
+}
+function onMouseDownClose(e: MouseEvent): void {
+  if (closeLock) return
+  Mouse.setTarget('tab.close', tab.id)
+  if (Menu.isOpen) {
+    Menu.close()
+    return
+  }
+
+  if (Tabs.editableTabId === tab.id) {
+    Tabs.setEditingValue(tab.title)
+    Mouse.resetTarget()
+  }
+
+  tempLockCloseBtn()
+
+  // Prevent auto-scrolling with middle-btn
+  if (e.button === 1) e.preventDefault()
+
+  if (!Settings.state.tabCloseOnMouseUp) closeBtnAction(e)
+}
+function onMouseUpClose(e: MouseEvent): void {
+  if (!Mouse.isTarget('tab.close', tab.id)) {
+    e.stopPropagation()
+    e.preventDefault()
+    Mouse.resetTarget()
+    Mouse.stopLongClick()
+    return
+  }
+  Mouse.resetTarget()
+  Mouse.stopLongClick()
+  Mouse.stopMultiSelection()
+  Selection.resetSelection()
+
+  if (Settings.state.tabCloseOnMouseUp) closeBtnAction(e)
+}
+function closeBtnAction(e: MouseEvent) {
+  if (e.button === 0) {
+    if (shouldBeConvertedToGroup()) return convertToGroup()
+    Tabs.removeTabs([tab.id])
+    e.preventDefault()
+    e.stopPropagation()
+  } else if (e.button === 1) {
+    if (Settings.state.tabCloseMiddleClick === 'close') {
+      if (shouldBeConvertedToGroup()) return convertToGroup()
+      Tabs.removeTabs([tab.id])
+    } else if (Settings.state.tabCloseMiddleClick === 'discard') {
+      Tabs.discardTabs([tab.id], true)
+    } else if (Settings.state.tabCloseMiddleClick === 'discard_or_close') {
+      discardOrCloseTabs([tab.id])
+    }
+    e.preventDefault()
+  } else if (e.button === 2) {
+    Tabs.removeBranches([tab.id])
+  }
+}
+
+function onMouseDown(e: MouseEvent): void {
+  Mouse.setTarget('tab', tab.id)
+
+  if (Settings.state.previewTabs) {
+    clearTimeout(Preview.state.openTimeout)
+
+    if (
+      Preview.state.mode === Preview.Mode.InPage ||
+      (Preview.state.mode !== Preview.Mode.InSidebar &&
+        Preview.state.status === Preview.Status.Opening)
+    ) {
+      Preview.closePPreview()
+    }
+  }
+
+  if (Menu.isOpen) {
+    Menu.close()
+    if (e.button === 0) return
+  }
+  if (tab.reactive.customTitleEdit) return
+
+  // Left
+  if (e.button === 0) {
+    if (e.ctrlKey) {
+      if (!(tab.sel || tab.selLock)) {
+        const noSel = !Selection.isSet()
+
+        Selection.selectTab(tab.id)
+
+        // Select active tab on initial ctrl-click, if setting enabled
+        if (Settings.state.ctrlSelAct && noSel) {
+          // Only if both active and current tab have the same
+          // pinned state, since sidebery doesn't support (yet)
+          // mixed selections.
+          const actTab = Tabs.byId[Tabs.activeId]
+          if (actTab && actTab.pinned === tab.pinned) {
+            Selection.selectTab(Tabs.activeId)
+          }
+        }
+      } else {
+        Selection.deselectTab(tab.id)
+      }
+      return
+    }
+
+    if (e.shiftKey) {
+      if (Settings.state.shiftSelAct && !Selection.isSet()) {
+        Selection.selectTab(Tabs.activeId)
+      }
+      if (!Selection.isSet()) Selection.selectTab(tab.id)
+      else if (tab) Selection.selectTabsRange(tab)
+      e.preventDefault()
+      return
+    }
+
+    if (Selection.isSet() && !(tab.sel || tab.selLock)) Selection.resetSelection()
+
+    if (!Selection.isSet() && !Settings.state.activateOnMouseUp) activate()
+
+    Mouse.startLongClick(e, longClickFeedback)
+  }
+
+  // Middle
+  else if (e.button === 1) {
+    e.preventDefault()
+    Mouse.blockWheel()
+
+    const selectedTabs = Selection.isTabs() ? Selection.ids() : []
+    Selection.resetSelection()
+
+    if (!selectedTabs.includes(tab.id)) selectedTabs.push(tab.id)
+
+    if (e.ctrlKey) {
+      if (Settings.state.tabMiddleClickCtrl === 'discard') {
+        Tabs.discardTabs(selectedTabs, true)
+        return
+      } else if (Settings.state.tabMiddleClickCtrl === 'discard_or_close') {
+        discardOrCloseTabs(selectedTabs)
+        return
+      } else if (Settings.state.tabMiddleClickCtrl === 'duplicate') {
+        Tabs.duplicateTabs([tab.id])
+        return
+      } else if (Settings.state.tabMiddleClickCtrl === 'dup_child') {
+        Tabs.duplicateTabs([tab.id], true)
+        return
+      } else if (Settings.state.tabMiddleClickCtrl === 'edit_title') {
+        Tabs.editTabTitle([tab.id])
+        return
+      }
+    }
+
+    if (e.shiftKey) {
+      if (Settings.state.tabMiddleClickShift === 'discard') {
+        Tabs.discardTabs(selectedTabs, true)
+        return
+      } else if (Settings.state.tabMiddleClickShift === 'discard_or_close') {
+        discardOrCloseTabs(selectedTabs)
+        return
+      } else if (Settings.state.tabMiddleClickShift === 'duplicate') {
+        Tabs.duplicateTabs([tab.id])
+        return
+      } else if (Settings.state.tabMiddleClickShift === 'dup_child') {
+        Tabs.duplicateTabs([tab.id], true)
+        return
+      } else if (Settings.state.tabMiddleClickShift === 'edit_title') {
+        Tabs.editTabTitle([tab.id])
+        return
+      }
+    }
+
+    if (tab.pinned) {
+      if (Settings.state.tabPinnedMiddleClick === 'discard') {
+        Tabs.discardTabs(selectedTabs, true)
+        return
+      } else if (Settings.state.tabPinnedMiddleClick === 'close') {
+        if (shouldBeConvertedToGroup()) convertToGroup()
+        else Tabs.removeTabs(selectedTabs)
+        return
+      } else if (Settings.state.tabPinnedMiddleClick === 'discard_or_close') {
+        discardOrCloseTabs(selectedTabs)
+        return
+      } else if (Settings.state.tabPinnedMiddleClick === 'duplicate') {
+        Tabs.duplicateTabs([tab.id])
+        return
+      } else if (Settings.state.tabPinnedMiddleClick === 'unpin') {
+        Tabs.unpinTabs([tab.id])
+        return
+      }
+    }
+
+    if (Settings.state.multipleMiddleClose && Settings.state.tabMiddleClick === 'close') {
+      Mouse.startMultiSelection(e, tab.id, selectedTabs)
+    } else {
+      if (Settings.state.tabMiddleClick === 'close') {
+        if (shouldBeConvertedToGroup()) convertToGroup()
+        else Tabs.removeTabs(selectedTabs)
+      } else if (Settings.state.tabMiddleClick === 'discard') {
+        Tabs.discardTabs(selectedTabs, true)
+      } else if (Settings.state.tabMiddleClick === 'discard_or_close') {
+        discardOrCloseTabs(selectedTabs)
+      } else if (Settings.state.tabMiddleClick === 'duplicate') {
+        Tabs.duplicateTabs([tab.id])
+      } else if (Settings.state.tabMiddleClick === 'dup_child') {
+        Tabs.duplicateTabs([tab.id], true)
+      }
+    }
+  }
+
+  // Right
+  else if (e.button === 2) {
+    if (!Settings.state.ctxMenuNative && !(tab.sel || tab.selLock)) {
+      Selection.resetSelection()
+      Mouse.startMultiSelection(e, tab.id)
+    }
+    Mouse.startLongClick(e, longClickFeedback)
+  }
+}
+
+function longClickFeedback(e: MouseEvent) {
+  let action
+  if (e.button === 0) {
+    action = Settings.state.tabLongLeftClick
+  } else if (e.button === 2) {
+    action = Settings.state.tabLongRightClick
+    Mouse.stopMultiSelection()
+    Selection.resetSelection()
+  }
+
+  let noop = false
+  if (action === 'reload') Tabs.reloadTabs([tab.id])
+  else if (action === 'discard') Tabs.discardTabs([tab.id], true)
+  else if (action === 'duplicate') Tabs.duplicateTabs([tab.id])
+  else if (action === 'dup_child') Tabs.duplicateTabs([tab.id], true)
+  else if (action === 'pin') Tabs.repinTabs([tab.id])
+  else if (action === 'mute') Tabs.remuteTabs([tab.id])
+  else if (action === 'clear_cookies') Tabs.clearTabsCookies([tab.id])
+  else if (action === 'new_after') Tabs.createTabAfter(tab.id)
+  else if (action === 'new_child' && !tab.pinned) Tabs.createChildTab(tab.id)
+  else if (action === 'edit_title' && !tab.pinned) Tabs.editTabTitle([tab.id])
+  else noop = true
+
+  if (!noop) Tabs.triggerFlashAnimation(tab)
+
+  return !noop
+}
+
+function onMouseUp(e: MouseEvent): void {
+  const sameTarget = Mouse.isTarget('tab', tab.id)
+  const sameTargetType = Mouse.isTarget('tab')
+  Mouse.resetTarget()
+  Mouse.stopLongClick()
+  if (Mouse.isLocked()) return Mouse.resetClickLock(120)
+  if (Mouse.longClickApplied) return
+  if (tab.reactive.customTitleEdit) return
+
+  if (e.button === 0) {
+    const withoutMods = !e.ctrlKey && !e.shiftKey
+    if (sameTarget) {
+      if (withoutMods) Selection.resetSelection()
+      if (Settings.state.activateOnMouseUp && withoutMods) activate()
+      if (
+        Settings.state.tabsSecondClickActPrev &&
+        tab.id === Tabs.activeId &&
+        withoutMods &&
+        !activating
+      ) {
+        Tabs.tabFlip()
+      }
+    }
+    activating = false
+  } else if (e.button === 1) {
+    const preselectedTabs = Mouse.stopMultiSelection()
+
+    if (
+      tab.pinned ||
+      (e.ctrlKey && Settings.state.tabMiddleClickCtrl !== 'none') ||
+      (e.shiftKey && Settings.state.tabMiddleClickShift !== 'none')
+    ) {
+      return
+    }
+
+    if (
+      Settings.state.multipleMiddleClose &&
+      Settings.state.tabMiddleClick === 'close' &&
+      sameTargetType
+    ) {
+      if (Selection.isSet()) {
+        let selectedTabs = Selection.ids()
+        if (selectedTabs.length === 1 && preselectedTabs?.length) selectedTabs = preselectedTabs
+        Tabs.removeTabs(selectedTabs)
+      } else {
+        Tabs.removeTabs([tab.id])
+      }
+    }
+  } else if (e.button === 2) {
+    if (e.ctrlKey || e.shiftKey) return
+
+    const inMultiSelectionMode = Mouse.multiSelectionMode
+    Mouse.stopMultiSelection()
+
+    if (inMultiSelectionMode && !Settings.state.autoMenuMultiSel && Selection.getLength() > 1) {
+      return
+    }
+
+    if (closeLock) return
+    if (Menu.isBlocked()) return
+    if (!Selection.isSet() && !Settings.state.ctxMenuNative) select()
+    if (!Settings.state.ctxMenuNative) Menu.open(MenuType.Tabs, e.clientX, e.clientY)
+  }
+}
+
+function onCtxMenu(e: MouseEvent): void {
+  if (
+    Mouse.isLocked() ||
+    !Settings.state.ctxMenuNative ||
+    e.ctrlKey ||
+    e.shiftKey ||
+    Mouse.longClickApplied
+  ) {
+    Mouse.resetClickLock()
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+
+  if (!e.ctrlKey && !e.shiftKey && !(tab.sel || tab.selLock)) {
+    Selection.resetSelection()
+  }
+
+  if (Menu.isBlocked()) {
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+
+  browser.menus.overrideContext({ context: 'tab', tabId: tab.id })
+
+  if (!Selection.isSet()) select()
+
+  Menu.open(MenuType.Tabs)
+
+  Mouse.stopLongClick()
+}
+
+function onDoubleClick(): void {
+  if (tab.reactive.customTitleEdit) return
+
+  const dc = Settings.state.tabDoubleClick
+  if (dc === 'reload') Tabs.reloadTabs([tab.id])
+  else if (dc === 'duplicate') Tabs.duplicateTabs([tab.id])
+  else if (dc === 'dup_child') Tabs.duplicateTabs([tab.id], true)
+  else if (dc === 'pin') Tabs.repinTabs([tab.id])
+  else if (dc === 'mute') Tabs.remuteTabs([tab.id])
+  else if (dc === 'clear_cookies') Tabs.clearTabsCookies([tab.id])
+  else if (dc === 'exp' && tab.isParent) Tabs.toggleBranch(tab.id)
+  else if (dc === 'new_after') Tabs.createTabAfter(tab.id)
+  else if (dc === 'new_child' && !tab.pinned) Tabs.createChildTab(tab.id)
+  else if (dc === 'close') {
+    if (shouldBeConvertedToGroup()) convertToGroup()
+    else Tabs.removeTabs([tab.id])
+  } else if (dc === 'edit_title') Tabs.editTabTitle([tab.id])
+}
+
+function onDragStart(e: DragEvent): void {
+  if (Mouse.isLocked()) {
+    Mouse.resetClickLock()
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+  Menu.close()
+  if (!Selection.isSet()) Selection.selectTabsBranch(tab)
+  Mouse.stopLongClick()
+  Sidebar.updateBounds()
+
+  if (Settings.state.previewTabs) {
+    clearTimeout(Preview.state.openTimeout)
+    clearTimeout(Preview.state.closeTimeout)
+
+    if (Preview.state.mode === Preview.Mode.InSidebar) Preview.closeSPreview()
+    else Preview.closePPreview()
+  }
+
+  // Check what to drag
+  const toDrag = [tab.id]
+  const dragItems: DragItem[] = []
+  const pinned = tab.pinned
+  const uriList = []
+  const links = []
+  const urlTitleList = []
+  for (const tab of Tabs.list) {
+    const inBranch = Settings.state.tabsTree && !pinned && toDrag.includes(tab.parentId)
+    if (inBranch || Selection.includes(tab.id)) {
+      uriList.push(tab.url)
+      links.push(`<a href="${tab.url}>${tab.title}</a>`)
+      urlTitleList.push(tab.url)
+      urlTitleList.push(tab.title)
+      toDrag.push(tab.id)
+      dragItems.push({
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+        parentId: tab.parentId,
+        container: tab.cookieStoreId,
+        customTitle: tab.customTitle,
+        customColor: tab.customColor,
+        folded: tab.folded,
+      })
+    }
+  }
+
+  const dragInfo: DragInfo = {
+    type: DragType.Tabs,
+    items: dragItems,
+    windowId: Windows.id,
+    incognito: Windows.incognito,
+    panelId: tab.panelId,
+    pinnedTabs: pinned,
+    x: e.clientX,
+    y: e.clientY,
+  }
+
+  DnD.broadcastDragInfo(dragInfo)
+  DnD.start(dragInfo, DropType.Tabs)
+
+  // Set native drag info
+  if (e.dataTransfer) {
+    const dragImgEl = document.getElementById('drag_image')
+    e.dataTransfer.setData('application/x-sidebery-dnd', JSON.stringify(dragInfo))
+    if (Settings.state.dndOutside === 'data' ? !e.altKey : e.altKey) {
+      const uris = uriList.join('\r\n')
+      e.dataTransfer.setData('text/x-moz-url', urlTitleList.join('\r\n'))
+      e.dataTransfer.setData('text/uri-list', uris)
+      e.dataTransfer.setData('text/plain', uris)
+      e.dataTransfer.setData('text/html', links.join('\r\n'))
+    }
+    if (dragImgEl) e.dataTransfer.setDragImage(dragImgEl, -3, -3)
+    e.dataTransfer.effectAllowed = 'copyMove'
+  }
+}
+
+function onMouseEnter(e: MouseEvent) {
+  if (Settings.state.tabWarmupOnHover) {
+    if (tab.active) {
+      /// warmup successor tab, in case user decides to close active tab
+      const successorTabId = tab.successorTabId
+      if (successorTabId && Tabs.byId[successorTabId]) {
+        browser.tabs
+          .warmup(successorTabId)
+          .catch(err => Logs.err('Tab.onMouseEnter: Warmup successor tab', err))
+      }
+    } else {
+      /// warmup hovered tab
+      browser.tabs
+        .warmup(tab.id)
+        .catch(err => Logs.err('Tab.onMouseEnter: Warmup hovered tab', err))
+    }
+  }
+
+  if (Settings.state.previewTabs) {
+    Preview.setTargetTab(tab.id, props.sticky)
+  } else if (!Settings.state.forceUpdTooltip) {
+    updateTooltipDebounced()
+  }
+}
+
+function onMouseLeave(): void {
+  if (Settings.state.previewTabs) {
+    Preview.resetTargetTab(tab.id)
+  } else {
+    clearTimeout(updateTooltipDebouncedTimeout)
+  }
+}
+
+function onAudioMouseDown(e: MouseEvent, tab: Tab): void {
+  Mouse.setTarget('tab.audio', tab.id)
+}
+
+function onAudioMouseUp(e: MouseEvent, tab: Tab) {
+  const sameTarget = Mouse.isTarget('tab.audio', tab.id)
+  Mouse.resetTarget()
+  if (!sameTarget) return
+
+  // Left button
+  if (e.button === 0) {
+    if (!tab.mediaPaused) Tabs.remuteTabs([tab.id])
+    else Tabs.playTabMedia(tab.id)
+  }
+
+  // Middle button
+  else if (e.button === 1) {
+    if (!tab.mediaPaused) Tabs.pauseTabMedia(tab.id)
+    else Tabs.playTabMedia(tab.id)
+  }
+
+  // Right button
+  else if (e.button === 2) {
+    if (tab.mediaPaused) {
+      tab.reactive.mediaPaused = tab.mediaPaused = false
+      Sidebar.updateMediaStateOfPanelDebounced(100, tab.panelId, tab)
+    }
+  }
+}
+
+let updateTooltipDebouncedTimeout: number | undefined
+function updateTooltipDebounced() {
+  clearTimeout(updateTooltipDebouncedTimeout)
+  updateTooltipDebouncedTimeout = setTimeout(() => {
+    Tabs.updateTooltip(tab.id)
+  }, Settings.state.updTooltipDelay)
+}
+
+function discardOrCloseTabs(selectedTabs: ID[]): void {
+  if (tab.discarded) {
+    Tabs.removeTabs(selectedTabs)
+  } else {
+    Tabs.discardTabs(selectedTabs, true)
+  }
+}
+
+/**
+ * Select this tab
+ */
+function select(): void {
+  if (!tab.pinned && tab.isParent && tab.folded && !Search.active) {
+    Selection.selectTabsBranch(tab)
+  } else {
+    Selection.selectTab(tab.id)
+  }
+}
+
+let activating = false
+function activate(): void {
+  if (Mouse.longClickApplied) return
+
+  if (Search.active && !Settings.state.searchTabSwitch) {
+    Search.stop()
+    Selection.resetSelection()
+  }
+
+  if (tab.id !== Tabs.activeId) {
+    activating = true
+    browser.tabs.update(tab.id, { active: true })
+  }
+}
+
+function onExpandMouseDown(): void {
+  Mouse.setTarget('tab.expand', tab.id)
+
+  if (Settings.state.previewTabs) {
+    clearTimeout(Preview.state.openTimeout)
+
+    if (
+      Preview.state.mode !== Preview.Mode.InSidebar &&
+      Preview.state.status === Preview.Status.Opening
+    ) {
+      Preview.closePPreview()
+    }
+  }
+}
+
+function onExpandMouseUp(e: MouseEvent): void {
+  const sameTarget = Mouse.isTarget('tab.expand', tab.id)
+  Mouse.resetTarget()
+
+  // Fold/Expand branch
+  if (e.button === 0) {
+    e.stopPropagation()
+
+    if (sameTarget) {
+      Menu.close()
+      Selection.resetSelection()
+      Tabs.toggleBranch(tab.id)
+    }
+  }
+
+  // Select whole branch and show menu
+  if (e.button === 2 && !e.ctrlKey && !e.shiftKey && sameTarget) {
+    Selection.resetSelection()
+    Selection.selectTabsBranch(tab)
+  }
+}
+
+function onImgFavError(): void {
+  if (props.sticky) {
+    Tabs.renderStickyFavicon(tab, true)
+    return
+  }
+  tab.favIconUrl = undefined
+  Tabs.renderFavicon(tab)
+}
+
+let scrollFrameId: number | undefined
+let mlttadown = false
+function onCustomTitleScroll(e: Event) {
+  if (scrollFrameId !== undefined) return
+
+  scrollFrameId = requestAnimationFrame(() => {
+    scrollFrameId = undefined
+    if (!tabEl.value) return
+    const titleInputEl = e.target as HTMLInputElement
+    if (mlttadown && titleInputEl.scrollTop === 0) {
+      mlttadown = false
+      tabEl.value.classList.remove('-mlttadown')
+    } else if (!mlttadown) {
+      mlttadown = true
+      tabEl.value.classList.add('-mlttadown')
+    }
+  })
+}
+
+function onCustomTitleBlur(e: Event) {
+  const titleInputEl = e.target as HTMLInputElement
+  tabEl.value?.classList.remove('-mlttadown')
+  if (scrollFrameId) cancelAnimationFrame(scrollFrameId)
+  scrollFrameId = undefined
+  mlttadown = false
+
+  Tabs.setEditableTabId(NOID)
+  tab.customTitle = titleInputEl.value
+  tab.reactive.customTitleEdit = false
+  Tabs.saveCustomTitle(tab.id)
+}
+
+function onCustomTitlteKD(e: KeyboardEvent) {
+  const titleEl = e.target as HTMLElement
+
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    titleEl.blur()
+  } else if (e.key === 'Escape') {
+    const tab = Tabs.byId[Tabs.editableTabId]
+    if (tab) titleEl.textContent = tab.title
+    titleEl.blur()
+    e.preventDefault()
+  }
+}
+</script>

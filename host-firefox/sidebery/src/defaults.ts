@@ -1,0 +1,200 @@
+export * from './defaults/containers'
+export * from './defaults/menu'
+export * from './defaults/panels'
+export * from './defaults/settings'
+
+export const PRE_SCROLL = 64
+export const ADDON_HOST = /* @__PURE__ */ browser.runtime.getURL('')
+export const SIDEBAR_URL = /* @__PURE__ */ browser.runtime.getURL('/sidebar/sidebar.html')
+export const GROUP_PATH = '/sidebery/group.html'
+export const GROUP_URL = /* @__PURE__ */ browser.runtime.getURL(GROUP_PATH)
+export const PLACEHOLDER_PATH = '/sidebery/url.html'
+export const PLACEHOLDER_URL = /* @__PURE__ */ browser.runtime.getURL(PLACEHOLDER_PATH)
+export const SETUP_PATH = '/page.setup/setup.html'
+export const SETUP_URL = /* @__PURE__ */ browser.runtime.getURL(SETUP_PATH)
+export const SEARCH_URL = /* @__PURE__ */ browser.runtime.getURL('/popup.search/search.html')
+export const EDITING_POPUP_URL = /* @__PURE__ */ browser.runtime.getURL(
+  '/popup.editing/editing.html'
+)
+export const RGB_COLORS: Record<string, string> = {
+  blue: '#37adff',
+  turquoise: '#00c79a',
+  cyan: '#00c79a',
+  green: '#51cd00',
+  yellow: '#ffcb00',
+  orange: '#ff9f00',
+  red: '#ff613d',
+  pink: '#ff4bda',
+  purple: '#af51f5',
+  toolbar: '#686868',
+  gray: '#686868',
+}
+export const COLOR_NAMES: string[] = [
+  'blue',
+  'turquoise',
+  'green',
+  'yellow',
+  'orange',
+  'red',
+  'pink',
+  'purple',
+  'toolbar',
+]
+export const IMG_RE = /(\.png|\.jpe?g|\.gif|\.webp|\.svg)([?#].*)?$/i
+export const VID_RE = /(\.mp4|\.webm)([?#].*)?$/i
+export const MUS_RE = /(\.mp3|\.flac)([?#].*)?$/i
+export const FILE_RE = /(^file:.*|\.pdf)([?#].*)?$/
+export const PAGE_HASH_RE =
+  /#(?<prefix>.*?)(?:(?::id:|%3Aid%3A).+?)?(?:(?:~!(?<chId>(?:\w|-){12})!ch!~)?$|(?:~!(?<chunkBody>[A-Za-z0-9+/_-]+={0,3})\.(?<chunkN>\d{1,8})\.(?<msgId>(?:\w|-){12})!(?<srcMark>\w)!(?<dstMark>\w)!~)$)/
+export const PAGE_CH_ID_RE = /#(?:.*?)(?:(?::id:|%3Aid%3A).+?)?(?:~!(?<chId>(?:\w|-){12})!ch!~)$/
+export const GROUP_RE = /\/sidebery\/group\.html/
+export const URL_PAGE_RE = /\/sidebery\/url\.html/
+export const SETTINGS_RE = /\/page\.setup\/setup\.html/
+export const FOLDER_NAME_DATA_RE = /^(.*) \[(.*)\]$/
+export const CONTAINER_IN_BOOKMARK_RE = / \[(".+","\w+","\w+"(,"\w+")?)\]/
+export const COLOR_IN_BOOKMARK_RE = / \[(c\d)\]/
+export const TITLE_IN_BOOKMARK_RE = / \[\*\]/
+export const GROUP_INITIAL_TITLE = '...'
+export const INITIAL_TITLE_RE = /^[0-9A-Za-z-]{1,63}(\.[0-9A-Za-z-]{1,63})+\//
+export const SITE_URL_RE =
+  /^([0-9A-Za-z-]{1,63}:\/\/[0-9A-Za-z-]{1,63}(\.[0-9A-Za-z-]{1,63})+)(\/|$)/
+export const BTN_ICONS: Record<string, string> = {
+  tabs_panel: 'icon_tabs',
+  bookmarks_panel: 'icon_bookmarks',
+  settings: 'icon_settings',
+  history: 'icon_clock',
+  sync: 'icon_sync',
+  sp: 'icon_ellipsis',
+  sd: 'icon_ellipsis',
+  hdn: 'icon_hide',
+  add_tp: 'icon_add_tabs_panel',
+  search: 'icon_search',
+  collapse: 'icon_collapse_all',
+  expand: 'icon_expand_all',
+  create_snapshot: 'icon_snapshot',
+  remute_audio_tabs: 'icon_mute',
+}
+
+export const LOCALHOST_RE = /^localhost(:\d+)?/
+export const HOSTNAME_RE = /^[0-9A-Za-z-]{1,63}:\/\/(?:www\.)?(.*?)(?:\/|$)/
+export const LINUX_HOME_RE = /^\/home\/(.+?)\//
+export const PATH_SEP_RE = /\/|\\/
+export const RE_STR_RE = /^\/(?<re>.*)\/(?<flags>[dgimsuvy]{1,8})?$/
+
+export const NOID: ID = -1
+export const SAMEID: ID = -5
+export const NEWID: ID = -10
+export const ASKID: ID = -11
+export const MOVEID: ID = -12
+
+export const CONTAINER_ICON_OPTS = [
+  { value: 'fingerprint', icon: '#fingerprint' },
+  { value: 'briefcase', icon: '#briefcase' },
+  { value: 'dollar', icon: '#dollar' },
+  { value: 'cart', icon: '#cart' },
+  { value: 'circle', icon: '#circle' },
+  { value: 'gift', icon: '#gift' },
+  { value: 'vacation', icon: '#vacation' },
+  { value: 'food', icon: '#food' },
+  { value: 'fruit', icon: '#fruit' },
+  { value: 'pet', icon: '#pet' },
+  { value: 'tree', icon: '#tree' },
+  { value: 'chill', icon: '#chill' },
+  { value: 'fence', icon: '#fence' },
+]
+export const COLOR_OPTS = [
+  { value: 'toolbar', color: 'toolbar' },
+  { value: 'blue', color: 'blue' },
+  { value: 'turquoise', color: 'turquoise' },
+  { value: 'green', color: 'green' },
+  { value: 'yellow', color: 'yellow' },
+  { value: 'orange', color: 'orange' },
+  { value: 'red', color: 'red' },
+  { value: 'pink', color: 'pink' },
+  { value: 'purple', color: 'purple' },
+]
+export const TAB_BOOKMARK_COLOR: Record<string, string> = {
+  blue: 'c1',
+  turquoise: 'c2',
+  green: 'c3',
+  yellow: 'c4',
+  orange: 'c5',
+  red: 'c6',
+  pink: 'c7',
+  purple: 'c8',
+}
+export const BOOKMARK_TAB_COLOR: Record<string, string> = {
+  c1: 'blue',
+  c2: 'turquoise',
+  c3: 'green',
+  c4: 'yellow',
+  c5: 'orange',
+  c6: 'red',
+  c7: 'pink',
+  c8: 'purple',
+}
+export const PROXY_OPTS = ['http', 'https', 'socks4', 'socks', 'direct']
+
+export const BKM_ROOT_ID = 'root________'
+export const BKM_OTHER_ID = 'unfiled_____'
+export const BKM_MENU_ID = 'menu________'
+export const BKM_MOBILE_ID = 'mobile______'
+export const BKM_TLBR_ID = 'toolbar_____'
+
+export const PIN_MARK = '📌'
+
+export const MIN_SEARCH_QUERY_LEN = 2
+
+export const FF_THEME_COLORS: (keyof browser.theme.ThemeColors)[] = [
+  'accentcolor',
+  'bookmark_text',
+  'button_background_active',
+  'button_background_hover',
+  'border',
+  'border_width',
+  'icons',
+  'icons_attention',
+  'frame',
+  'frame_inactive',
+  'ntp_background',
+  'ntp_text',
+  'panel_item_active',
+  'panel_item_hover',
+  'panel_separator',
+  'popup',
+  'popup_border',
+  'popup_highlight',
+  'popup_highlight_text',
+  'popup_text',
+  'sidebar',
+  'sidebar_base',
+  'sidebar_border',
+  'sidebar_highlight',
+  'sidebar_highlight_text',
+  'sidebar_text',
+  'sidebar_darker_border_width',
+  'sidebar_top_padding',
+  'sidebar_active_bg',
+  'sidebar_active_border',
+  'tab_background_separator',
+  'tab_background_text',
+  'tab_line',
+  'tab_loading',
+  'tab_selected',
+  'tab_text',
+  'textcolor',
+  'toolbar',
+  'toolbar_bottom_separator',
+  'toolbar_field',
+  'toolbar_field_border',
+  'toolbar_field_border_focus',
+  'toolbar_field_focus',
+  'toolbar_field_highlight',
+  'toolbar_field_highlight_text',
+  'toolbar_field_separator',
+  'toolbar_field_text',
+  'toolbar_field_text_focus',
+  'toolbar_text',
+  'toolbar_top_separator',
+  'toolbar_vertical_separator',
+]

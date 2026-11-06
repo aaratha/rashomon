@@ -1,0 +1,1520 @@
+import type * as T from './types'
+import * as D from './defaults'
+import * as E from './enums'
+import { translate } from './dict'
+
+// prettier-ignore
+const ALPH = [
+  'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
+  'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+  'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
+  'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+  '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '_',
+]
+export const UNDERSCORE_RE = /_/g
+const CSS_NUM_RE = /([\d.]+)(\w*)/
+const URL_RE = /^https?:\/\/.+/
+const PunycodeConf = {
+  maxInt: 2147483647,
+  base: 36,
+  tMin: 1,
+  baseMinusTMin: 35,
+  tMax: 26,
+  skew: 38,
+  damp: 700,
+  initialBias: 72,
+  initialN: 128,
+  delimiter: '-',
+} as const
+
+/**
+ *  Generate base64-like uid
+ **/
+export function uid(): string {
+  // Get time and random parts
+  let tp = Date.now()
+  let rp1 = (Math.random() * 2147483648) | 0
+  let rp2 = (Math.random() * 2147483648) | 0
+  const chars = []
+
+  // Rand part
+  for (let i = 0; i < 5; i++) {
+    chars.push(ALPH[rp1 & 63])
+    rp1 = rp1 >> 6
+  }
+  for (let i = 5; i < 7; i++) {
+    chars.push(ALPH[rp2 & 63])
+    rp2 = rp2 >> 6
+  }
+
+  // Time part
+  for (let i = 7; i < 12; i++) {
+    chars.push(ALPH[tp & 63])
+    tp = tp >> 6
+  }
+
+  return chars.join('')
+}
+
+export interface FuncCtx {
+  busy: boolean
+  func: (arg: any) => void
+}
+
+/**
+ * Run function ASAP
+ */
+export function asap(cb: T.AnyFunc, delay: number): FuncCtx {
+  const ctx: FuncCtx = {
+    busy: false,
+    func: (a: any) => {
+      if (ctx.busy) return
+      ctx.busy = true
+
+      if (!delay && window.requestAnimationFrame) {
+        window.requestAnimationFrame(() => {
+          cb(a)
+          ctx.busy = false
+        })
+      } else {
+        setTimeout(() => {
+          cb(a)
+          ctx.busy = false
+        }, delay || 66)
+      }
+    },
+  }
+  return ctx
+}
+
+export function debounce<T extends (...a: any[]) => void>(
+  cb: T
+): (delay: number, ...a: Parameters<T>) => void {
+  const ctx = { timeout: -1 as number | null, cb: cb.bind(self) as T }
+  return (delay: number, ...a: Parameters<T>) => {
+    if (ctx.timeout) clearTimeout(ctx.timeout)
+    ctx.timeout = setTimeout(() => {
+      ctx.timeout = null
+      ctx.cb(...a)
+    }, delay)
+  }
+}
+
+export function wait(timeout: number | undefined, delay: number, cb: () => void): number {
+  clearTimeout(timeout)
+  return setTimeout(() => cb(), delay)
+}
+
+/**
+ * Sleep
+ */
+export async function sleep(ms = 1000): Promise<void> {
+  return new Promise(wakeup => {
+    setTimeout(wakeup, ms)
+  })
+}
+
+/**
+ * Deadline
+ */
+export function deadline<T>(deadline: number, fallback: T, promise: Promise<T>): Promise<T> {
+  return new Promise((ok, meh) => {
+    setTimeout(() => ok(fallback), deadline)
+    promise.then(ok).catch(meh)
+  })
+}
+
+/**
+ * Converts number of bytes into readable string
+ */
+export function sizeToString(bytes: number): string {
+  if (bytes < 1000) return `${bytes} b`
+
+  const kb = bytes / 1024
+  if (kb < 10) return `${Math.round(kb * 100) / 100} kb`
+  if (kb < 100) return `${Math.round(kb * 10) / 10} kb`
+  if (kb < 1000) return `${Math.round(kb)} kb`
+
+  const mb = bytes / 1048576
+  if (mb < 10) return `${Math.round(mb * 100) / 100} mb`
+  if (mb < 100) return `${Math.round(mb * 10) / 10} mb`
+  if (mb < 1000) return `${Math.round(mb)} mb`
+
+  const gb = bytes / 1073741824
+  if (gb < 10) return `${Math.round(gb * 100) / 100} gb`
+  if (gb < 100) return `${Math.round(gb * 10) / 10} gb`
+  return `${Math.round(gb)} gb`
+}
+
+/**
+ * Get byte len of string
+ */
+export function strSize(str: string): string {
+  const bytes = new Blob([str]).size
+  return sizeToString(bytes)
+}
+
+export function uDate(ms: number, delimiter?: string, dayStartTime?: number): string {
+  if (!delimiter) delimiter = '.'
+
+  if (dayStartTime) {
+    if (ms > dayStartTime) return translate('time.today')
+    if (ms > dayStartTime - 86400000) return translate('time.yesterday')
+  }
+
+  const dt = new Date(ms)
+  const dtday = `${dt.getDate()}`.padStart(2, '0')
+  const dtmth = `${dt.getMonth() + 1}`.padStart(2, '0')
+  return `${dt.getFullYear()}${delimiter}${dtmth}${delimiter}${dtday}`
+}
+
+export function dDate(dt: Date, delimiter?: string, dayStartTime?: number): string {
+  if (!delimiter) delimiter = '.'
+
+  if (dayStartTime) {
+    const ms = dt.getTime()
+    if (ms > dayStartTime) return translate('time.today')
+    if (ms > dayStartTime - 86400000) return translate('time.yesterday')
+  }
+
+  const dtday = `${dt.getDate()}`.padStart(2, '0')
+  const dtmth = `${dt.getMonth() + 1}`.padStart(2, '0')
+  return `${dt.getFullYear()}${delimiter}${dtmth}${delimiter}${dtday}`
+}
+
+/**
+ * Get time string from unix seconds
+ */
+export function uTime(ms: number, delimiter = ':', sec = true): string {
+  const dt = new Date(ms)
+  let time = `${dt.getHours()}`.padStart(2, '0')
+  time += delimiter + `${dt.getMinutes()}`.padStart(2, '0')
+  if (sec) time += delimiter + `${dt.getSeconds()}`.padStart(2, '0')
+
+  return time
+}
+
+export function dTime(dt: Date, delimiter = ':', sec = true): string {
+  let time = `${dt.getHours()}`.padStart(2, '0')
+  time += delimiter + `${dt.getMinutes()}`.padStart(2, '0')
+  if (sec) time += delimiter + `${dt.getSeconds()}`.padStart(2, '0')
+
+  return time
+}
+
+const DATE_TIME_TEMPLATE_RE = /%%|%Y|%M|%D|%h|%m|%s/g
+
+export function dateTimeTemplate(str: string, msOrDate: number | Date): string {
+  let dt: Date
+  if (typeof msOrDate === 'number') dt = new Date(msOrDate)
+  else dt = msOrDate
+
+  str = str.replace(DATE_TIME_TEMPLATE_RE, match => {
+    if (match === '%%') return '%'
+    else if (match === '%Y') return dt.getFullYear().toString()
+    else if (match === '%M') return `${dt.getMonth() + 1}`.padStart(2, '0')
+    else if (match === '%D') return `${dt.getDate()}`.padStart(2, '0')
+    else if (match === '%h') return `${dt.getHours()}`.padStart(2, '0')
+    else if (match === '%m') return `${dt.getMinutes()}`.padStart(2, '0')
+    else if (match === '%s') return `${dt.getSeconds()}`.padStart(2, '0')
+    return ''
+  })
+
+  return str
+}
+
+/**
+ * Get hostname of the url
+ */
+export function getHostname(url: string): string {
+  if (!url) return url
+  return D.HOSTNAME_RE.exec(url)?.[1] ?? url
+}
+
+/**
+ * Get domain of the hostname
+ */
+export function getDomain(hostname: string, withPubSuffix: boolean, depth: number): string {
+  if (!withPubSuffix && depth === 0) return ''
+  if (withPubSuffix && depth === -1) return hostname
+  if (withPubSuffix && depth === 1) {
+    try {
+      const result = browser.publicSuffix?.getDomain(hostname)
+      if (result) return result
+    } catch {
+      // noop
+    }
+  }
+  let pubSuffix
+  try {
+    pubSuffix = browser.publicSuffix?.getKnownSuffix(hostname) ?? undefined
+  } catch {
+    // noop
+  }
+  let s = pubSuffix ? hostname.length - pubSuffix.length - 1 : hostname.lastIndexOf('.')
+  let e = withPubSuffix ? hostname.length : s
+  if (e < 0) e = 0
+  if (depth < 0) depth = 127
+  while (s > 0 && depth-- > 0) {
+    s = hostname.lastIndexOf('.', s - 1)
+  }
+  if (s < -1) s = -1
+  else if (s > e) s = e - 1
+  return hostname.slice(s + 1, e)
+}
+
+export function sameStart(a: string, b: string, limit: number) {
+  const aLen = a.length
+  const bLen = b.length
+  if (!aLen || !bLen) return false
+  if (aLen > bLen) {
+    if (bLen > limit) return a.startsWith(b.slice(0, limit))
+    else return a.startsWith(b)
+  } else {
+    if (bLen > limit) return b.startsWith(a.slice(0, limit))
+    else return b.startsWith(a)
+  }
+}
+
+/**
+ * Generate HSL color from string
+ */
+export function colorFromString(str: string, minLightness = 50): string {
+  let h = 0
+  let s = 0
+  let l = 0
+  for (let pcc, cc, i = 1; i < str.length; i += 2) {
+    cc = str.charCodeAt(i)
+    pcc = str.charCodeAt(i - 1)
+    h += pcc + cc
+    s += pcc
+    l += cc
+  }
+
+  if (minLightness < 20) minLightness = 20
+  else if (minLightness > 80) minLightness = 80
+
+  return `hsl(${(h % 181) * 2}deg, ${(s % 6) * 5 + 60}%, ${(l % 3) * 10 + minLightness}%)`
+}
+
+const RGBA_RE = /rgba?\((\d+%?)[,\s]\s*(\d+%?)[,\s]\s*(\d+%?)(,|\s\/\s)?\s*([\d.]+%?)?\)/
+const HEXA_RE =
+  /^#([0-f])([0-f])([0-f])([0-f])?$|^#([0-f][0-f])([0-f][0-f])([0-f][0-f])([0-f][0-f])?$/
+const HSLA_RE = /hsla?\((\d+%?)[,\s]\s*(\d+%?)[,\s]\s*(\d+%?)[,\s]?\s*([\d.]+%?)?\)/
+export function toRGBA(color?: string | T.RGB | T.RGBA | null): T.RGBA | undefined {
+  if (!color) return
+
+  if (Array.isArray(color)) {
+    if (color[3] === undefined) color[3] = 1
+    return color as T.RGBA
+  }
+
+  const rgba = RGBA_RE.exec(color)
+  if (rgba) {
+    const r = rgba[1]
+    let rn = parseInt(r)
+    if (isNaN(rn)) return
+    if (r.endsWith('%')) rn = Math.round((rn / 100) * 255)
+    if (rn > 255) rn = 255
+
+    const g = rgba[2]
+    let gn = parseInt(g)
+    if (isNaN(gn)) return
+    if (g.endsWith('%')) gn = Math.round((rn / 100) * 255)
+    if (gn > 255) gn = 255
+
+    const b = rgba[3]
+    let bn = parseInt(b)
+    if (isNaN(bn)) return
+    if (b.endsWith('%')) bn = Math.round((rn / 100) * 255)
+    if (bn > 255) bn = 255
+
+    const a = rgba[5]
+    let an = 1
+    if (a !== undefined) {
+      an = parseFloat(a)
+      if (a.endsWith('%')) an = an / 100
+      if (isNaN(an)) an = 1
+    }
+
+    return [rn, gn, bn, an]
+  }
+
+  const hexa = HEXA_RE.exec(color)
+  if (hexa) {
+    const r = hexa[1]?.repeat(2) || hexa[5]
+    const rn = parseInt(r, 16)
+    if (isNaN(rn)) return
+
+    const g = hexa[2]?.repeat(2) || hexa[6]
+    const gn = parseInt(g, 16)
+    if (isNaN(gn)) return
+
+    const b = hexa[3]?.repeat(2) || hexa[7]
+    const bn = parseInt(b, 16)
+    if (isNaN(bn)) return
+
+    const a = hexa[4]?.repeat(2) ?? hexa[8]
+    let an = 1
+    if (a !== undefined) {
+      an = parseInt(a, 16) / 255
+      if (isNaN(an)) an = 1
+    }
+
+    return [rn, gn, bn, an]
+  }
+
+  const hsla = HSLA_RE.exec(color)
+  if (hsla) {
+    const h = hsla[1]
+    const hn = parseInt(h)
+    if (isNaN(hn)) return
+
+    const s = hsla[2]
+    const sn = parseInt(s)
+    if (isNaN(sn)) return
+
+    const l = hsla[3]
+    const ln = parseInt(l)
+    if (isNaN(ln)) return
+
+    const a = hsla[4]
+    let an = 1
+    if (a !== undefined) {
+      an = parseFloat(a)
+      if (a.endsWith('%')) an = an / 100
+      if (isNaN(an)) an = 1
+    }
+
+    const rgb = HSLtoRGB(hn, sn, ln) as number[]
+    rgb.push(an)
+
+    return rgb as [number, number, number, number]
+  }
+
+  if (color === 'black') return [0, 0, 0, 1]
+  if (color === 'white') return [255, 255, 255, 1]
+  if (color === 'gray') return [128, 128, 128, 1]
+  if (color === 'transparent') return [0, 0, 0, 0]
+}
+
+export function hueToChan(p: number, q: number, t: number): number {
+  if (t < 0) t += 1
+  if (t > 1) t -= 1
+  if (t < 1 / 6) return p + (q - p) * 6 * t
+  if (t < 1 / 2) return q
+  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+  return p
+}
+
+export function HSLtoRGB(hue: number, sat: number, lit: number): [number, number, number] {
+  let r, g, b
+
+  hue = hue / 360
+  sat = sat / 100
+  lit = lit / 100
+
+  if (sat === 0) {
+    r = g = b = lit
+  } else {
+    const q = lit < 0.5 ? lit * (1 + sat) : lit + sat - lit * sat
+    const p = 2 * lit - q
+    r = hueToChan(p, q, hue + 1 / 3)
+    g = hueToChan(p, q, hue)
+    b = hueToChan(p, q, hue - 1 / 3)
+  }
+
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
+}
+
+/**
+ * Convert key to css variable --kebab-case
+ */
+export function toCSSVarName(key: string): string {
+  return `--${key.replace(UNDERSCORE_RE, '-')}`
+}
+
+/**
+ * Parse numerical css value
+ */
+export function parseCSSNum(cssValue: string, or = 0): [number, string] {
+  const parseResult = CSS_NUM_RE.exec(cssValue.trim())
+  if (!parseResult) return [0, '']
+  let num: number | string = parseResult[1]
+  const unit = parseResult[2]
+
+  if (num.includes('.')) {
+    if (num[0] === '.') num = '0' + num
+    num = parseFloat(num)
+  } else {
+    num = parseInt(num)
+  }
+  if (isNaN(num)) num = or
+  return [num, unit]
+}
+
+/**
+ * Find common substring
+ */
+export function commonSubStr(strings: string[]): string {
+  if (!strings || !strings.length) return ''
+  if (strings.length === 1) return strings[0]
+  const first = strings[0]
+  const others = strings.slice(1)
+  let start = 0
+  let end = 1
+  let out = ''
+  let common = ''
+
+  while (end <= first.length) {
+    common = first.slice(start, end)
+
+    const isCommon = others.every(s => {
+      return s.toLowerCase().includes(common.toLowerCase())
+    })
+
+    if (isCommon) {
+      if (common.length > out.length) out = common
+      end++
+    } else {
+      end = ++start + 1
+    }
+  }
+
+  return out
+}
+
+export async function getStringFromDragItem(item: DataTransferItem): Promise<string> {
+  return new Promise(res => item.getAsString(s => res(s)))
+}
+
+interface DragEventParseResult {
+  items?: T.ItemInfo[]
+  url?: string
+  text?: string
+  file?: File | null
+  matchedNativeTabs?: T.Tab[]
+}
+export async function parseDragEvent(
+  event: DragEvent,
+  lastFocusedId?: ID
+): Promise<DragEventParseResult | undefined> {
+  return new Promise<DragEventParseResult | undefined>(async res => {
+    if (!event.dataTransfer) return res(undefined)
+    const result: DragEventParseResult = {}
+    const types = event.dataTransfer.types
+
+    let urlType
+    if (types.includes('text/x-moz-url-data')) urlType = 'text/x-moz-url-data'
+    else if (types.includes('text/x-moz-url')) urlType = 'text/x-moz-url'
+    else if (types.includes('text/x-moz-text-internal')) urlType = 'text/x-moz-text-internal'
+
+    let isNativeTab = false
+    if (types.includes('text/x-moz-text-internal')) isNativeTab = true
+
+    let textType
+    if (types.includes('text/x-moz-url-desc')) textType = 'text/x-moz-url-desc'
+    else if (types.includes('text/plain')) textType = 'text/plain'
+
+    for (const item of event.dataTransfer.items) {
+      // List of URL\nTitle
+      if (item.type === 'text/x-moz-url') {
+        const value = await getStringFromDragItem(item)
+        const list = value.split('\n')
+        const items = []
+        for (let i = 0; i < list.length; i += 2) {
+          const url = list[i]
+          const title = list[i + 1]
+          items.push({ id: i, url, title })
+        }
+        if (items.length) result.items = items
+      }
+
+      if (!result.url && item.type === urlType) {
+        const value = await getStringFromDragItem(item)
+        if (value && urlType === 'text/x-moz-url') {
+          const urlAndTitle = value.split('\n')
+          result.url = urlAndTitle[0]
+          result.text = urlAndTitle[1]
+        } else if (isNativeTab && lastFocusedId !== undefined) {
+          result.matchedNativeTabs = (await browser.tabs.query({
+            highlighted: true,
+            windowId: lastFocusedId,
+          })) as T.Tab[]
+        } else {
+          result.url = value
+        }
+      }
+      if (!result.text && item.type === textType) result.text = await getStringFromDragItem(item)
+      if (!result.file && item.kind === 'file') result.file = item.getAsFile()
+    }
+
+    res(result)
+  })
+}
+
+export function isGroupUrl(url: string): boolean {
+  return url.startsWith('m') && url.startsWith('/sidebery/group.html', 52)
+}
+export function isPlaceholderUrl(url: string): boolean {
+  return url.startsWith('m') && url.startsWith('/sidebery/url.html', 52)
+}
+
+export function createGroupUrl(name?: string, pinUrl?: string, pinCtr?: string): string {
+  let url = browser.runtime.getURL('sidebery/group.html')
+  if (!name) name = uid()
+  if (pinUrl) {
+    if (!pinCtr) pinCtr = D.CONTAINER_ID
+    url += '?pin=' + encodeURIComponent(pinCtr + '::' + pinUrl)
+  }
+  url = url + `#${encodeURIComponent(name)}`
+  return url
+}
+
+export function createPlaceholderUrl(info: T.PlaceholderInfo): string {
+  if (isPlaceholderUrl(info.url)) info = parsePlaceholderUrl(info.url)
+  if (info.title === undefined && info.url.startsWith('file:')) {
+    const i = info.url.lastIndexOf('/')
+    if (i !== -1) {
+      try {
+        info.title = decodeURIComponent(info.url.slice(i + 1))
+      } catch {
+        // ok
+      }
+    }
+  }
+
+  let url = D.PLACEHOLDER_URL
+  const infoJSON = JSON.stringify(info)
+  const bytes = new TextEncoder().encode(infoJSON)
+  let binString = ''
+  for (const byte of bytes) {
+    binString += String.fromCharCode(byte)
+  }
+  url = `${url}#_${btoa(binString)}`
+  return url
+}
+
+export function parsePlaceholderUrl(url: string): T.PlaceholderInfo {
+  const reResult = D.PAGE_HASH_RE.exec(url)
+  const data = reResult?.groups?.prefix
+  if (!data) throw 'parsePlaceholderUrl: no prefix'
+  return decodePlaceholderInfo(data)
+}
+
+export function decodePlaceholderInfo(info: string): T.PlaceholderInfo {
+  if (info.startsWith('_')) {
+    const binString = atob(info.slice(1))
+    const bytes = new Uint8Array(binString.length)
+    for (let i = 0; i < binString.length; i++) {
+      bytes[i] = binString.charCodeAt(i)
+    }
+    return JSON.parse(new TextDecoder().decode(bytes)) as T.PlaceholderInfo
+  }
+  if (info.startsWith('%5B')) {
+    const [url, title] = JSON.parse(decodeURIComponent(info)) as [string, string]
+    return { url, title }
+  }
+  return { url: info }
+}
+
+export function updateGroupUrlBase(url: string): string {
+  const index = url.indexOf('group.html') + 10
+  const newUrl = D.GROUP_URL + url.slice(index)
+  return newUrl
+}
+
+export function updatePlaceholderUrlBase(url: string): string {
+  const index = url.indexOf('url.html') + 8
+  const newUrl = D.PLACEHOLDER_URL + url.slice(index)
+  return newUrl
+}
+
+export function getGroupName(groupUrl: string): string | undefined {
+  const reResult = D.PAGE_HASH_RE.exec(groupUrl)
+  const rawTitle = reResult?.groups?.prefix
+  if (!rawTitle) return
+  try {
+    return decodeURIComponent(rawTitle).trim()
+  } catch {
+    return
+  }
+}
+
+/**
+ * Clone (Not all types, check impl)
+ */
+export function clone<T extends any[] | Record<any, any> | Map<any, any> | Set<any>>(v: T): T {
+  const cloned = new WeakMap<any, any>()
+  return cloneAny(v, cloned) as T
+}
+function cloneAny<T>(v: T, cloned: WeakMap<any, any>) {
+  if (v === null || typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+    return v
+  }
+  if (Array.isArray(v)) return cloneArray(v, cloned) as T
+  if (v instanceof Set) return cloneSet(v, cloned) as T
+  if (v instanceof Map) return cloneMap(v, cloned) as T
+  if (v instanceof RegExp) return new RegExp(v.source, v.flags)
+  if (v instanceof Date) return new Date(v.getTime())
+  if (v instanceof URL) return new URL(v.href)
+  if (v instanceof Promise) return v
+  if (v instanceof Error) return v
+  if (v instanceof Function) return v
+  if (v instanceof Object) {
+    if (Object.getPrototypeOf(v) === Object.prototype) return cloneObject(v, cloned) as T
+    if (v) return cloneInstance(v, cloned) as T
+  }
+}
+function cloneArray(src: any[], cloned: WeakMap<any, any>): any[] {
+  const dst: any[] = []
+  if (cloned.has(src)) return cloned.get(src)
+  cloned.set(src, dst)
+  for (const v of src) {
+    dst.push(cloneAny(v, cloned))
+  }
+  return dst
+}
+function cloneSet(src: Set<any>, cloned: WeakMap<any, any>): Set<any> {
+  const dst = new Set()
+  if (cloned.has(src)) return cloned.get(src)
+  cloned.set(src, dst)
+  for (const v of src) {
+    dst.add(cloneAny(v, cloned))
+  }
+  return dst
+}
+function cloneMap(src: Map<any, any>, cloned: WeakMap<any, any>): Map<any, any> {
+  const dst = new Map()
+  if (cloned.has(src)) return cloned.get(src)
+  cloned.set(src, dst)
+  for (const [k, v] of src) {
+    const dstK = cloneAny(k, cloned)
+    if (dstK === undefined) continue
+    const dstV = cloneAny(v, cloned)
+    dst.set(dstK, dstV)
+  }
+  return dst
+}
+function cloneObject(src: Record<any, any>, cloned: WeakMap<any, any>): Record<any, any> {
+  const dst: Record<any, any> = {}
+  if (cloned.has(src)) return cloned.get(src)
+  cloned.set(src, dst)
+  for (const k of Object.keys(src)) {
+    dst[k] = cloneAny(src[k], cloned)
+  }
+  return dst
+}
+function cloneInstance<T extends object>(src: T, cloned: WeakMap<any, any>): T {
+  const dst = Object.create(Object.getPrototypeOf(src)) as T
+  if (cloned.has(src)) return cloned.get(src)
+  cloned.set(src, dst)
+  for (const key of Reflect.ownKeys(src)) {
+    const desc = Reflect.getOwnPropertyDescriptor(src, key)
+    if (desc) {
+      if (desc.value) desc.value = cloneAny(desc.value, cloned) as typeof desc.value
+      Reflect.defineProperty(dst, key, desc)
+    }
+  }
+  return dst
+}
+
+/**
+ * Prepare url to be opened by sidebery
+ */
+export function sanitizeUrl(url?: string, title?: string): string | undefined {
+  if (!url) return url
+  if (url === 'about:newtab') return undefined
+  if (url === 'about:blank') return undefined
+  if (url.startsWith('about:reader?url=')) {
+    try {
+      url = decodeURIComponent(url.slice(17))
+    } catch {
+      // Do nothing
+    }
+  }
+  if (
+    url.startsWith('chrome:') ||
+    url.startsWith('javascript:') ||
+    url.startsWith('data:') ||
+    url.startsWith('file:') ||
+    url.startsWith('jar:file:') ||
+    url.startsWith('blob:') ||
+    url.startsWith('magnet:') ||
+    url.startsWith('about:')
+  ) {
+    try {
+      return createPlaceholderUrl({ url, title })
+    } catch {
+      return url
+    }
+  } else {
+    return url
+  }
+}
+
+/**
+ * Convert url from Sidebery-safe/specific to its original form
+ */
+export function restoreUrl(url?: string): string | undefined {
+  if (!url) return url
+  // Parse placeholder URL and return original url
+  else if (isPlaceholderUrl(url)) {
+    try {
+      return parsePlaceholderUrl(url).url
+    } catch {
+      return url
+    }
+  }
+  // Remove broadcast channel id and hash message from group page url
+  else if (isGroupUrl(url) && url.endsWith('~')) {
+    try {
+      return url.replace(D.PAGE_HASH_RE, '#$<prefix>')
+    } catch {
+      return url
+    }
+  }
+  // Ok
+  else return url
+}
+
+export function recreateNormalizedObject<T extends object>(obj: Partial<T>, defaults: T): T {
+  const result = clone(defaults)
+  for (const key of Object.keys(defaults) as (keyof T)[]) {
+    if (obj[key] !== undefined) result[key] = obj[key]
+  }
+  return result as T
+}
+
+export function normalizeObject<T extends object>(obj: T, defaults: T): void {
+  const clonedDefaults = clone(defaults)
+  for (const key of Object.keys(clonedDefaults) as (keyof T)[]) {
+    if (obj[key] === undefined) obj[key] = clonedDefaults[key]
+  }
+}
+
+export function updateObject<T extends object>(obj: T, src: T, keysSrc: T | (keyof T)[]): void {
+  const keys = Array.isArray(keysSrc) ? keysSrc : (Object.keys(keysSrc) as (keyof T)[])
+  for (const key of keys) {
+    if (src[key] === undefined) continue
+    obj[key] = src[key]
+  }
+}
+
+export function findUrls(str: string): string[] {
+  const urls = []
+  const words = str.split(/\s|,/)
+  for (const word of words) {
+    if (URL_RE.test(word)) urls.push(word)
+  }
+  return urls
+}
+
+export async function loadBinAsBase64(url: string): Promise<string | ArrayBuffer | null> {
+  return new Promise(async res => {
+    const deadline = setTimeout(() => res(null), 2000)
+
+    let response
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        mode: 'no-cors',
+        credentials: 'omit',
+      })
+      clearTimeout(deadline)
+    } catch (err) {
+      return res(null)
+    }
+    if (!response) return res(null)
+
+    const blob = await response.blob()
+    const reader = new FileReader()
+    reader.onload = () => res(reader.result)
+    reader.readAsDataURL(blob)
+  })
+}
+
+/**
+ *  Create canvas
+ *
+ * > width: number - canvas width
+ * > height: number - canvas heihgt
+ * < Element - canvas
+ **/
+export function createCanvas(width: number, height: number): HTMLCanvasElement {
+  // Canvas box
+  const canvasBoxEl = document.createElement('div')
+  canvasBoxEl.style.position = 'absolute'
+  canvasBoxEl.style.overflow = 'hidden'
+  canvasBoxEl.style.opacity = '0'
+  canvasBoxEl.style.top = '0'
+  canvasBoxEl.style.left = '0'
+  canvasBoxEl.style.width = '1px'
+  canvasBoxEl.style.height = '1px'
+  document.body.appendChild(canvasBoxEl)
+
+  // Canvas
+  const canvasEl = document.createElement('canvas')
+  canvasEl.width = width
+  canvasEl.height = height
+  canvasBoxEl.appendChild(canvasEl)
+
+  return canvasEl
+}
+
+export async function createImage(src: string, w: number, h: number): Promise<HTMLImageElement> {
+  return new Promise((res, rej) => {
+    const img = new Image(w, h)
+    img.onload = () => res(img)
+    img.onerror = e => rej(e)
+    img.src = src
+  })
+}
+
+export async function setImageSrc(img: HTMLImageElement, src: string): Promise<void> {
+  return new Promise((res, rej) => {
+    img.onload = () => res()
+    img.onerror = e => rej(e)
+    img.src = src
+  })
+}
+
+export function isSvg(img: T.DataUriImage): boolean {
+  return img.startsWith('data:image/svg+xml;base64,')
+}
+
+export function setSvgImageSize(svgImg: T.DataUriImage, w: number, h: number): string | undefined {
+  let base64 = svgImg.slice(26)
+
+  let svg
+  try {
+    svg = decodeURIComponent(atob(base64))
+  } catch {
+    return
+  }
+
+  svg = svg.replace('<svg ', `<svg width="${w}" height="${h}" `)
+
+  try {
+    base64 = btoa(svg)
+  } catch {
+    return
+  }
+
+  return 'data:image/svg+xml;base64,' + base64
+}
+
+export function svgImageContainsCssMediaQueries(svgImg: T.DataUriImage): boolean {
+  const base64 = svgImg.slice(26)
+
+  let svgText
+  try {
+    svgText = atob(base64)
+  } catch {
+    return false
+  }
+  return /@media\s*\(/.test(svgText)
+}
+
+export function strHash(str: string): number {
+  let hash = 0
+  const len = str.length
+  for (let chc, i = 0; i < len; i++) {
+    chc = str.charCodeAt(i)
+    hash = (hash << 5) - hash + chc
+    hash |= 0
+  }
+  return hash
+}
+
+// Stolen from https://github.com/bestiejs/punycode.js/ (MIT License)
+/**
+ * Bias adaptation function as per section 3.4 of RFC 3492.
+ * https://tools.ietf.org/html/rfc3492#section-3.4
+ * @private
+ */
+function adapt(delta: number, numPoints: number, firstTime: boolean) {
+  let k = 0
+  delta = firstTime ? Math.floor(delta / PunycodeConf.damp) : delta >> 1
+  delta += Math.floor(delta / numPoints)
+  for (; delta > (PunycodeConf.baseMinusTMin * PunycodeConf.tMax) >> 1; k += PunycodeConf.base) {
+    delta = Math.floor(delta / PunycodeConf.baseMinusTMin)
+  }
+  return Math.floor(k + ((PunycodeConf.baseMinusTMin + 1) * delta) / (delta + PunycodeConf.skew))
+}
+
+// Stolen from https://github.com/bestiejs/punycode.js/ (MIT License)
+/**
+ * Converts a Punycode string of ASCII-only symbols to a string of Unicode
+ * symbols.
+ */
+export function decodePunycode(input: string): string {
+  const output = []
+  const inputLength = input.length
+  const base = PunycodeConf.base
+  let i = 0
+  let n = 128
+  let bias = 72
+
+  // Handle the basic code points: let `basic` be the number of input code
+  // points before the last delimiter, or `0` if there is none, then copy
+  // the first basic code points to the output.
+
+  let basic = input.lastIndexOf('-')
+  if (basic < 0) basic = 0
+
+  for (let j = 0; j < basic; ++j) {
+    // if it's not a basic code point
+    if (input.charCodeAt(j) >= 0x80) return input
+    output.push(input.charCodeAt(j))
+  }
+
+  // Main decoding loop: start just after the last delimiter if any basic code
+  // points were copied; start at the beginning otherwise.
+
+  for (let index = basic > 0 ? basic + 1 : 0; index < inputLength /* no final expression */;) {
+    // `index` is the index of the next character to be consumed.
+    // Decode a generalized variable-length integer into `delta`,
+    // which gets added to `i`. The overflow checking is easier
+    // if we increase `i` as we go, then subtract off its starting
+    // value at the end to obtain `delta`.
+    const oldi = i
+    for (let w = 1, k = base /* no condition */; ; k += base) {
+      if (index >= inputLength) return input
+
+      let digit: number
+      const codePoint = input.charCodeAt(index++)
+      if (codePoint - 0x30 < 0x0a) digit = codePoint - 0x16
+      else if (codePoint - 0x41 < 0x1a) digit = codePoint - 0x41
+      else if (codePoint - 0x61 < 0x1a) digit = codePoint - 0x61
+      else digit = base
+
+      if (digit >= base || digit > Math.floor((PunycodeConf.maxInt - i) / w)) return input
+
+      i += digit * w
+      let t: number
+      if (k <= bias) t = PunycodeConf.tMin
+      else if (k >= bias + PunycodeConf.tMax) t = PunycodeConf.tMax
+      else t = k - bias
+
+      if (digit < t) {
+        break
+      }
+
+      const baseMinusT = base - t
+      if (w > Math.floor(PunycodeConf.maxInt / baseMinusT)) return input
+
+      w *= baseMinusT
+    }
+
+    const out = output.length + 1
+    bias = adapt(i - oldi, out, oldi == 0)
+
+    // `i` was supposed to wrap around from `out` to `0`,
+    // incrementing `n` each time, so we'll fix that now:
+    if (Math.floor(i / out) > PunycodeConf.maxInt - n) return input
+
+    n += Math.floor(i / out)
+    i %= out
+
+    // Insert `n` at position `i` of the output.
+    output.splice(i++, 0, n)
+  }
+
+  return String.fromCodePoint(...output)
+}
+
+// Stolen from https://github.com/bestiejs/punycode.js/ (MIT License)
+export function decodeUrlPunycode(url: string): string {
+  if (!url.startsWith('xn--')) return url
+
+  const labels = url.split('.')
+  const result = labels.map(l => decodePunycode(l.slice(4).toLowerCase())).join('.')
+  return result
+}
+
+export function getDayStartMS(): number {
+  const now = new Date()
+  now.setMilliseconds(0)
+  now.setSeconds(0)
+  now.setMinutes(0)
+  now.setHours(0)
+  return now.getTime()
+}
+
+export function getTimeHHMM(t: number): string {
+  const dt = new Date(t)
+  return `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * Remove first found value from array
+ */
+export function rmFromArray<T>(arr: T[], val: T): number {
+  const index = arr.indexOf(val)
+  if (index > -1) arr.splice(index, 1)
+  return index
+}
+
+export function isRegExp(value: unknown): value is RegExp {
+  return !!(value as RegExp).test
+}
+
+interface RetryConfig {
+  action: (again: () => void, isLastTry: boolean) => Promise<void>
+  interval: number
+  count: number
+  increment?: number
+}
+
+export async function retry(conf: RetryConfig): Promise<void> {
+  return new Promise(async res => {
+    const increment = conf.increment ?? 0
+    let count = conf.count
+    let interval = conf.interval
+
+    while (count--) {
+      let result = false
+      await conf.action(() => (result = true), count === 0)
+
+      if (!result || count <= 0) break
+
+      await sleep(interval)
+      interval += increment
+    }
+
+    res()
+  })
+}
+
+interface PendingConfig<R> {
+  action: () => Promise<R>
+  check: (result: R) => boolean
+  interval: number
+  tryCount: number
+}
+
+export async function pending<R>(conf: PendingConfig<R>): Promise<R> {
+  return new Promise<R>(async (ok, meh) => {
+    let i = 0
+
+    while (true) {
+      let result
+      try {
+        result = await conf.action()
+      } catch (err) {
+        return meh(err)
+      }
+
+      if (conf.check(result)) {
+        return ok(result)
+      }
+
+      if (++i >= conf.tryCount) {
+        return ok(result)
+      }
+
+      await sleep(conf.interval)
+    }
+  })
+}
+
+/**
+ * Search back then forth
+ */
+export function findNear<T>(list: T[], index: number, cb: (v: T) => boolean): T | undefined {
+  const len = list.length
+  let result: T | undefined
+  let i = index
+  let v: T | undefined
+
+  while (i-- > 0) {
+    v = list[i]
+    if (v !== undefined && cb(v)) {
+      result = v
+      break
+    }
+  }
+
+  if (!result) {
+    i = index
+    while (++i < len) {
+      v = list[i]
+      if (v !== undefined && cb(v)) {
+        result = v
+        break
+      }
+    }
+  }
+
+  return result
+}
+
+export function getShortTimestamp(ms: number, currentDate: Date): string {
+  const dt = new Date(ms)
+
+  const y = dt.getFullYear()
+  const cy = currentDate.getFullYear()
+  if (y !== cy) return y.toString()
+
+  const m = (dt.getMonth() + 1).toString().padStart(2, '0')
+  const d = dt.getDate().toString().padStart(2, '0')
+  const md = `${m}/${d}`
+  const cm = (currentDate.getMonth() + 1).toString().padStart(2, '0')
+  const cd = currentDate.getDate().toString().padStart(2, '0')
+  const cmd = `${cm}/${cd}`
+  if (md !== cmd) return md
+
+  const min: string = dt.getMinutes().toString().padStart(2, '0')
+  const hr: string = dt.getHours().toString().padStart(2, '0')
+  return `${hr}:${min}`
+}
+
+export function isNavBtn(item?: T.NavItem): item is T.NavBtn {
+  if (!item) return false
+  return (item as T.NavBtn).class === E.NavItemClass.btn
+}
+export function isNavSpace(item?: T.NavItem): item is T.NavSpace {
+  if (!item) return false
+  return (item as T.NavSpace).class === E.NavItemClass.space
+}
+export function isNavPanel(item?: T.NavItem): item is T.Panel {
+  if (!item) return false
+  return (item as T.Panel).class === E.NavItemClass.panel
+}
+export function isTabsPanel(panel?: object): panel is T.TabsPanel {
+  if (!panel) return false
+  return (panel as T.PanelConfig).type === E.PanelType.tabs
+}
+export function isBookmarksPanel(panel?: object): panel is T.BookmarksPanel {
+  if (!panel) return false
+  return (panel as T.PanelConfig).type === E.PanelType.bookmarks
+}
+export function isHistoryPanel(panel?: T.PanelConfig): panel is T.HistoryPanel {
+  if (!panel) return false
+  return panel.type === E.PanelType.history
+}
+export function isSyncPanel(panel?: T.PanelConfig): panel is T.SyncPanel {
+  if (!panel) return false
+  return panel.type === E.PanelType.sync
+}
+export function isSubListTitle(something: any): something is T.SubListTitleInfo {
+  if (!something) return false
+  if ((something as Record<string, any>).isSubListTitle) return true
+  return false
+}
+
+export function findFrom<T>(
+  arr: readonly T[],
+  index: number,
+  pred: (val: T, i: number) => unknown
+): T | undefined {
+  const len = arr.length
+  for (let i = index, v; i < len; i++) {
+    v = arr[i]
+    if (pred(v, i)) return v
+  }
+}
+export function findLastFrom<T>(
+  arr: readonly T[],
+  index: number,
+  pred: (val: T, i: number) => unknown
+): T | undefined {
+  for (let i = index, v; i >= 0; i--) {
+    v = arr[i]
+    if (pred(v, i)) return v
+  }
+}
+
+interface QueueItem {
+  ok: (result: any) => void
+  err: (error: any) => void
+  fn: T.AnyAsyncFunc
+  args: any[]
+}
+
+export class AsyncQueue {
+  private _waitingQueue = false
+  private _queue: QueueItem[] = []
+
+  public async add<T extends T.AnyAsyncFunc>(
+    fn: T,
+    ...args: Parameters<T>
+  ): Promise<Awaited<ReturnType<T>>> {
+    if (this._waitingQueue) {
+      return new Promise<Awaited<ReturnType<T>>>((ok, err) => {
+        this._queue.push({ ok, err, fn, args })
+      })
+    }
+
+    this._waitingQueue = true
+
+    const result = await fn(...args)
+
+    if (this._queue.length) this._processQueue()
+    else this._waitingQueue = false
+
+    /* eslint @typescript-eslint/no-unsafe-return: off */
+    return result
+  }
+
+  private async _processQueue() {
+    let nextTask = this._queue.shift()
+    while (nextTask) {
+      try {
+        /* eslint @typescript-eslint/no-unsafe-argument: off */
+        nextTask.ok(await nextTask.fn(...nextTask.args))
+      } catch (err) {
+        nextTask.err(err)
+      }
+
+      nextTask = this._queue.shift()
+    }
+
+    this._waitingQueue = false
+  }
+}
+
+export const GLOBAL_QUEUE = /* @__PURE__ */ new AsyncQueue()
+
+export function getRandomFrom<T>(arr: T[]): T {
+  const index = Math.round(Math.random() * (arr.length - 1))
+  return arr[index]
+}
+
+export function settledOr<T>(result: PromiseSettledResult<T>, fallback: T): T {
+  return result?.status === 'fulfilled' ? (result.value ?? fallback) : fallback
+}
+
+export class BenchAvrg {
+  private _deltas: number[] = []
+  private _timeout: number | undefined
+  private _prefix = 'AVRG:'
+  private _delay = 2500
+  private _start: number | undefined
+
+  constructor(prefix = 'AVRG:', delay = 2500) {
+    this._prefix = prefix
+    this._delay = delay
+  }
+
+  public start() {
+    this._start = performance.now()
+  }
+
+  public end() {
+    if (this._start === undefined) return
+
+    const delta = performance.now() - this._start
+    this._deltas.push(delta)
+    this._start = undefined
+
+    clearTimeout(this._timeout)
+    this._timeout = setTimeout(() => {
+      // eslint-disable-next-line no-console
+      console.info(this._prefix, this._deltas.reduce((a, n) => a + n, 0) / this._deltas.length)
+      this._deltas = []
+      this._start = undefined
+    }, this._delay)
+  }
+}
+
+export function withoutEmptyFolders<T extends { id: ID; url?: string; parentId?: ID }>(
+  items: T[]
+): T[] {
+  const nonEmptyFolders = new Set<ID>()
+  const itemsById = new Map<ID, T>()
+  for (const item of items) {
+    if (
+      item.url &&
+      item.parentId !== undefined &&
+      item.parentId !== D.NOID &&
+      !nonEmptyFolders.has(item.parentId)
+    ) {
+      let parent = itemsById.get(item.parentId ?? D.NOID)
+      while (parent) {
+        nonEmptyFolders.add(parent.id)
+        parent = itemsById.get(parent.parentId ?? D.NOID)
+      }
+    }
+
+    itemsById.set(item.id, item)
+  }
+
+  return items.filter(item => item.url || nonEmptyFolders.has(item.id))
+}
+
+const INDENT_RE = /^(( |\t)*)(.*)/
+const SPACES_ONLY_RE = /^ +$/
+const LINK_RE =
+  /href="(?<htmlUrl>[0-9A-Za-z-]{1,63}:[\w-.~:?#@!%$&'()*+,;=]*(?:[/;:,@]+[\w-.~:?#@!%$&'()*+,;=]+)+|about:[\w-]+)"(?:.*?)>(?<htmlLabel>.*?)<\/a>|\[(?<mdLabel>.*?)\]\((?<mdUrl>[0-9A-Za-z-]{1,63}:[\w-.~:?#@!%$&'()*+,;=]*(?:[/;:,@]+[\w-.~:?#@!%$&'()*+,;=]+)+|about:[\w-]+)\)|(?<url>[0-9A-Za-z-]{1,63}:[\w-.~:?#@!%$&'()*+,;=]*(?:[/;:,@]+[\w-.~:?#@!%$&'()*+,;=]+)+|about:[\w-]+)/g
+export function parseTextForItems(srcText: string): T.ItemInfo[] {
+  const items: T.ItemInfo[] = []
+  const parsedLines: { id: number; parentId: number; txt: string; indent: string }[] = []
+
+  // Split into lines
+  const lines = srcText.split(/\r\n|\n/)
+
+  // Split lines into indent and text
+  let hasSpaceIndents = false
+  let hasTabIndents = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const reResult = INDENT_RE.exec(line)
+    if (reResult !== null && reResult[3]) {
+      const lineData = { id: i * 10000, parentId: -1, indent: reResult[1] ?? '', txt: reResult[3] }
+      parsedLines.push(lineData)
+
+      if (!hasSpaceIndents && lineData.indent.includes(' ')) hasSpaceIndents = true
+      if (!hasTabIndents && lineData.indent.includes('\t')) hasTabIndents = true
+    }
+  }
+
+  // Handle mixed tab/space indents
+  if (hasSpaceIndents && hasTabIndents) {
+    let minSpaceIndentDeltaLen = 9999
+    let prevIndentLen = 0
+
+    for (const lineData of parsedLines) {
+      // Spaces-only
+      if (SPACES_ONLY_RE.test(lineData.indent)) {
+        const indentDelta = Math.abs(lineData.indent.length - prevIndentLen)
+        if (indentDelta > 0 && indentDelta < minSpaceIndentDeltaLen) {
+          minSpaceIndentDeltaLen = indentDelta
+        }
+        prevIndentLen = lineData.indent.length
+      }
+    }
+
+    // If minimal delta of space indents (indent size) is found
+    if (minSpaceIndentDeltaLen !== 9999) {
+      // Replace all Tabs with spaces
+      const sIndent = ' '.repeat(minSpaceIndentDeltaLen)
+      parsedLines.forEach(ld => (ld.indent = ld.indent.replaceAll('\t', sIndent)))
+    }
+    // Or do nothing and handle Tab as a 1-length char :/
+  }
+
+  // Parse tree structure
+  let prevIndentLen = 0
+  let prevLineId = -1
+  let prevLineParentId = -1
+  for (let i = 0; i < parsedLines.length; i++) {
+    const lineData = parsedLines[i]
+
+    // Skip empty lines
+    if (!lineData.txt) continue
+
+    // Handle indent
+    if (prevIndentLen < lineData.indent.length) {
+      lineData.parentId = prevLineId
+    }
+    // Handle same indent
+    else if (prevIndentLen === lineData.indent.length) {
+      lineData.parentId = prevLineParentId
+    }
+    // Handle outdent
+    else if (prevIndentLen > lineData.indent.length) {
+      // Find parent
+      for (let j = i - 1; j >= 0; j--) {
+        const rLineData = parsedLines[j]
+
+        // It should have smaller indent
+        if (rLineData.indent.length < lineData.indent.length) {
+          lineData.parentId = rLineData.id
+          break
+        }
+      }
+    }
+    prevIndentLen = lineData.indent.length
+    prevLineId = lineData.id
+    prevLineParentId = lineData.parentId
+  }
+
+  // Parse url / title and create ItemInfo objects
+  for (let i = 0; i < parsedLines.length; i++) {
+    const lineData = parsedLines[i]
+    if (!lineData) continue
+
+    const inlineLinks: T.ItemInfo[] = []
+
+    let reResult
+    while ((reResult = LINK_RE.exec(lineData.txt))) {
+      let label = reResult.groups?.htmlLabel ?? reResult.groups?.mdLabel ?? ''
+      let url = reResult.groups?.htmlUrl ?? reResult.groups?.mdUrl ?? reResult.groups?.url
+
+      if (!url || !URL.canParse(url)) continue
+
+      if (isGroupUrl(url)) {
+        url = updateGroupUrlBase(url)
+        label = getGroupName(url) ?? label
+      } else if (isPlaceholderUrl(url)) {
+        url = updatePlaceholderUrlBase(url)
+      }
+
+      if (!label && url.startsWith('file:')) {
+        const i = url.lastIndexOf('/')
+        if (i !== -1) {
+          try {
+            label = decodeURIComponent(url.slice(i + 1))
+          } catch {
+            // ok
+          }
+        }
+      }
+
+      inlineLinks.push({
+        id: lineData.id,
+        parentId: lineData.parentId,
+        url: sanitizeUrl(url),
+        title: label,
+      })
+    }
+    LINK_RE.lastIndex = 0
+
+    // Fix ids for more than 1 links in line (except the last one)
+    if (inlineLinks.length > 1) {
+      for (let j = 0; j < inlineLinks.length - 1; j++) {
+        const linkInfo = inlineLinks[j]
+        if (linkInfo) (linkInfo.id as number) += j + 1
+      }
+    }
+
+    // If links are not found create title-only item
+    if (!inlineLinks.length) {
+      items.push({ id: lineData.id, parentId: lineData.parentId, title: lineData.txt })
+    } else {
+      items.push(...inlineLinks)
+    }
+  }
+
+  return items
+}
+
+// TODO: After 140ESR(2025-09-16) replace with Iterator.prototype.some()
+export function someIter<T>(it: IteratorObject<T>, pred: (value: T) => unknown): boolean {
+  for (const val of it) {
+    if (pred(val)) return true
+  }
+  return false
+}
+
+export function untilElGetFocus(el: HTMLInputElement | null, cb: (el: HTMLInputElement) => void) {
+  if (!el) return
+
+  // Already focused
+  if (document.activeElement === el && document.hasFocus()) return
+
+  cb(el)
+
+  let n = 0
+  const interval = setInterval(() => {
+    n++
+    if ((document.activeElement === el && document.hasFocus()) || n > 200) {
+      clearInterval(interval)
+      return
+    }
+
+    cb(el)
+  }, 5)
+}

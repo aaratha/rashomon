@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    // "noUncheckedIndexedAccess": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "allowJs": false,
+    "moduleResolution": "bundler",
+    "target": "ESNext",
+    "module": "ESNext",
+    "removeComments": true,
+    "preserveConstEnums": false,
+    "outDir": "./addon",
+    "jsx": "preserve",
+    "paths": {
+      "src/*": ["./src/*"]
+    },
+    "skipDefaultLibCheck": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue"],
+  "exclude": ["**/__test__/*"],
+  "vueCompilerOptions": {
+    "plugins": [
+      "@vue/language-plugin-pug"
+    ]
+  }
+}

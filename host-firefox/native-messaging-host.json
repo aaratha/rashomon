@@ -1,0 +1,7 @@
+{
+  "name": "dev.rashomon.kernel",
+  "description": "Rashomon kernel native-messaging host (Firefox-extension Host Stage 0 spike — see docs/FIREFOX_EXTENSION_SPIKE.md)",
+  "path": "/Users/aaratha/projects/rashomon/target/debug/rashomon-kernel-native-host",
+  "type": "stdio",
+  "allowed_extensions": ["{3c078156-979c-498b-8990-85f7987dd929}"]
+}

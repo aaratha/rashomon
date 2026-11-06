@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "rashomon-kernel-helper"
 path = "src/helper.rs"
 
+[[bin]]
+name = "rashomon-kernel-native-host"
+path = "src/native_host.rs"
+
 [package.metadata.cef.bundle]
 helper_name = "rashomon-kernel-helper"
 

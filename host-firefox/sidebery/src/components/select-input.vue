@@ -1,0 +1,206 @@
+<template lang="pug">
+.SelectInput(ref="rootEl" :data-color="props.color" :data-container-color="props.containerColor" :data-folded="folded")
+  .focus-el(ref="focusEl" tabindex="-1")
+  template(v-if="folded && activeOpt")
+    .opt(
+      :title="getTooltip(activeOpt)"
+      :data-none="((activeOpt as InputObjOpt).value ?? activeOpt) === props.noneOpt"
+      :data-color="!(activeOpt as InputObjOpt).containerColor ? (activeOpt as InputObjOpt).color ?? false : undefined"
+      :data-container-color="(activeOpt as InputObjOpt).containerColor"
+      data-active="true")
+      svg(v-if="((activeOpt as InputObjOpt).icon || props.icon)?.startsWith('#')")
+        use(:href="(activeOpt as InputObjOpt).icon || props.icon")
+      img(v-else-if="(activeOpt as InputObjOpt).icon || props.icon" :src="(activeOpt as InputObjOpt).icon || props.icon")
+      p(v-else-if="props.label") {{translate(props.label + activeOpt, props.plurNum)}}
+      p(v-if="(activeOpt as InputObjOpt).title") {{(activeOpt as InputObjOpt).title}}
+    .opt.-exp(v-if="folded")
+      svg: use(href="#icon_expand")
+    teleport(v-if="folded && !disabledDropDownTeleport" to="#root")
+      .select-input-drop-down-layer(v-if="isOpen" @wheel="onWheel" @mouseup="onMouseUp" @contextmenu.stop.prevent)
+        .select-input-drop-down(:style="dropDownStyle")
+          .select-input-drop-down-content(ref="dropDownEl")
+            .opt(
+              v-for="opt in inactiveOpts"
+              :id="'opt' + ((opt as InputObjOpt).value ?? opt)"
+              :title="getTooltip(opt)"
+              :data-none="((opt as InputObjOpt).value ?? opt) === props.noneOpt"
+              :data-color="!(opt as InputObjOpt).containerColor ? (opt as InputObjOpt).color ?? false : undefined"
+              :data-container-color="(opt as InputObjOpt).containerColor"
+              :data-active="((opt as InputObjOpt).value ?? opt) === preSelected"
+              @mouseup.stop="select(opt)")
+              svg(v-if="((opt as InputObjOpt).icon || props.icon)?.startsWith('#')")
+                use(:href="((opt as InputObjOpt).icon || props.icon)")
+              img(v-else-if="(opt as InputObjOpt).icon || props.icon" :src="(opt as InputObjOpt).icon || props.icon")
+              p(v-else-if="props.label") {{translate(props.label + opt, props.plurNum)}}
+              p(v-if="(opt as InputObjOpt).title") {{(opt as InputObjOpt).title}}
+  template(v-else)
+    .opt(
+      v-for="opt in props.opts"
+      :title="getTooltip(opt)"
+      :data-none="((opt as InputObjOpt).value ?? opt) === props.noneOpt"
+      :data-color="!(opt as InputObjOpt).containerColor ? (opt as InputObjOpt).color ?? false : undefined"
+      :data-container-color="(opt as InputObjOpt).containerColor"
+      :data-active="isActive(opt)"
+      @mouseup.stop="select(opt)")
+        svg(v-if="((opt as InputObjOpt).icon || props.icon)?.startsWith('#')")
+          use(:href="((opt as InputObjOpt).icon || props.icon)")
+        img(v-else-if="(opt as InputObjOpt).icon || props.icon" :src="(opt as InputObjOpt).icon || props.icon")
+        p(v-else-if="props.label") {{translate(props.label + opt, props.plurNum)}}
+</template>
+
+<script lang="ts" setup>
+import { computed, ref, reactive, onMounted, nextTick } from 'vue'
+import { translate } from 'src/dict'
+import type { SelectInputComponent } from 'src/types'
+
+type InputObjOpt = {
+  value: string | number
+  tooltip?: string
+  color?: string
+  containerColor?: string
+  icon?: string
+  title?: string
+}
+type InputOption = string | number | InputObjOpt
+
+interface SelectInputProps {
+  value: InputOption | InputOption[]
+  opts: readonly InputOption[]
+  label?: string
+  plurNum?: number | string
+  color?: string
+  containerColor?: string
+  icon?: string
+  noneOpt?: string | number
+  folded?: boolean
+  preSelected?: string | number
+}
+
+const rootEl = ref<HTMLElement | null>(null)
+const focusEl = ref<HTMLElement | null>(null)
+const dropDownEl = ref<HTMLElement | null>(null)
+const disabledDropDownTeleport = ref(true)
+const isOpen = ref(false)
+const emit = defineEmits(['update:value', 'dropdown-blur'])
+const props = withDefaults(defineProps<SelectInputProps>(), { noneOpt: 'none' })
+const dropDownStyle = reactive({
+  '--left': '0px',
+  '--top': '0px',
+} as Record<string, string>)
+
+const activeOpt = computed<InputOption>(() => {
+  if (!props.folded) return props.noneOpt
+  return props.opts.find(isActive) ?? props.noneOpt
+})
+const inactiveOpts = computed<InputOption[]>(() => {
+  if (!props.folded) return []
+  return props.opts.filter(opt => !isActive(opt))
+})
+
+onMounted(() => {
+  setupDropDownTeleport()
+})
+
+function setupDropDownTeleport() {
+  disabledDropDownTeleport.value = false
+}
+
+function getOptColor(opt: InputOption): string | undefined {
+  return (opt as InputObjOpt).color
+}
+
+function isActive(opt: InputOption): boolean {
+  if (Array.isArray(props.value)) {
+    const val = opt instanceof Object ? opt.value : opt
+    return props.value.includes(val)
+  } else {
+    if (opt instanceof Object) return (opt as InputObjOpt).value === props.value
+    else return props.value === opt
+  }
+}
+
+function select(option: InputOption): void {
+  if (Array.isArray(props.value)) {
+    const val = option instanceof Object ? option.value : option
+    const index = props.value.indexOf(val)
+    if (index === -1) props.value.push(val)
+    else props.value.splice(index, 1)
+
+    emit('update:value', props.value)
+  } else {
+    if (option instanceof Object) emit('update:value', option.value)
+    else emit('update:value', option)
+  }
+}
+
+function getTooltip(option: InputOption): string {
+  if (option) {
+    if (typeof option === 'object') {
+      if (option.tooltip) return option.tooltip
+      if (option.title) return option.title
+    } else if (props.label) {
+      return translate(`${props.label}${option}`, props.plurNum)
+    }
+  }
+  return ''
+}
+
+function onMouseUp(e: DOMEvent<MouseEvent>) {
+  emit('dropdown-blur')
+}
+
+function onWheel(e: WheelEvent): void {
+  if (!dropDownEl.value) return
+
+  const scrollOffset = dropDownEl.value.scrollTop
+  const maxScrollOffset = dropDownEl.value.scrollHeight - dropDownEl.value.offsetHeight
+  if (scrollOffset === 0 && e.deltaY < 0) e.preventDefault()
+  if (scrollOffset === maxScrollOffset && e.deltaY > 0) e.preventDefault()
+}
+
+async function open() {
+  if (!rootEl.value) return
+
+  isOpen.value = true
+
+  const elStyles = window.getComputedStyle(rootEl.value, null)
+  let bottomPadding = parseInt(elStyles.getPropertyValue('padding-bottom'))
+  if (isNaN(bottomPadding)) bottomPadding = 0
+
+  await nextTick()
+  if (!dropDownEl.value) return
+
+  const inputRect = rootEl.value.getBoundingClientRect()
+  const dropDownRect = dropDownEl.value.getBoundingClientRect()
+
+  const viewportHeight = window.innerHeight
+  const viewportWidth = window.innerWidth
+  const inputBottom = Math.round(inputRect.bottom)
+  const inputRight = Math.round(inputRect.right)
+
+  let dropDownTop = inputBottom - bottomPadding + 1
+  if (viewportHeight <= dropDownTop + dropDownRect.height + bottomPadding) {
+    dropDownTop = viewportHeight - dropDownRect.height - bottomPadding
+  }
+
+  if (viewportWidth < dropDownRect.width + (viewportWidth - inputRight)) {
+    const inputWidth = Math.round(inputRect.width)
+    dropDownStyle['--max-width'] = `${inputWidth}px`
+    dropDownRect.width = inputWidth
+  }
+
+  dropDownStyle['--top'] = `${dropDownTop}px`
+  dropDownStyle['--left'] = `${inputRight - dropDownRect.width}px`
+}
+
+function close() {
+  isOpen.value = false
+}
+
+const publicInterface: SelectInputComponent = {
+  open,
+  close,
+  getFocusEl: () => focusEl.value ?? undefined,
+}
+defineExpose(publicInterface)
+</script>

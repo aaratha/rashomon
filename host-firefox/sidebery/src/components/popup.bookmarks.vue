@@ -1,0 +1,400 @@
+<template lang="pug">
+.BookmarksPopup.popup-container(@mousedown.stop.self="onCancel" @mouseup.stop)
+  .popup(v-if="Bookmarks.reactive.popup")
+    h2 {{Bookmarks.reactive.popup.title}}
+    .field(v-if="Bookmarks.reactive.popup.nameField")
+      .field-label {{translate('popup.bookmarks.name_label')}}
+      TextInput.input(
+        ref="nameInput"
+        v-model:value="Bookmarks.reactive.popup.name"
+        :or="translate(titlePlaceholder)"
+        :tabindex="state.tabindex"
+        :line="true"
+        @update:value="validate()"
+        @keydown="onTitleKD")
+    .field(v-if="Bookmarks.reactive.popup.urlField")
+      .field-label URL
+      TextInput.input(
+        ref="urlInput"
+        v-model:value="Bookmarks.reactive.popup.url"
+        :or="translate('bookmarks_editor.url_placeholder')"
+        :tabindex="state.tabindex"
+        :line="true"
+        @update:value="validate()"
+        @keydown="onUrlKD")
+    .location(
+      v-if="Bookmarks.reactive.popup.locationField"
+      :title="path"
+      @click="toggleTree()")
+      .field-label {{translate('popup.bookmarks.location_label')}}
+      .location-body
+        .location-value {{selectedFolder}}
+        .new-folder-btn(v-if="!state.newFolderMode" @click.stop="onNewFolderClick")
+          svg: use(href="#icon_new_folder")
+      .new-folder-field(v-if="state.newFolderMode")
+        LoadingDots(v-if="state.creatingNewFolder")
+        TextInput.new-folder-input(
+          v-if="!state.creatingNewFolder"
+          ref="newFolderTitleInput"
+          v-model:value="state.newFolderTitle"
+          :or="translate('popup.bookmarks.location_new_folder_placeholder')"
+          :line="true"
+          @click.stop=""
+          @keydown="onNewFolderKD")
+        .new-folder-btn(v-if="!state.creatingNewFolder" @click.stop="onNewFolderClick")
+          svg
+            use(v-if="state.newFolderTitle" href="#icon_new_folder")
+            use(v-else href="#icon_x")
+    .tree(v-if="state.showTree")
+      ScrollBox
+        BookmarkNode.root-node(
+          v-for="nodeId in Bookmarks.reactive.root"
+          :key="nodeId"
+          :nodeId="nodeId"
+          :filter="foldersFilter"
+          :panelId="'popup'")
+    .recent-locations(v-if="state.bookmarksRecentFolders.length && !state.showTree")
+      .field-label {{translate('popup.bookmarks.recent_locations_label')}}
+      .recent-folder(
+        v-for="folder of state.bookmarksRecentFolders"
+        :key="folder.id"
+        :data-sel="folder.id === Bookmarks.reactive.popup.location"
+        @click="onRecentFolderClick(folder.id)")
+        svg.folder-icon: use(href="#icon_folder")
+        .folder-label {{folder.title}}
+    .loading-screen(v-if="state.loading")
+      LoadingDots
+    .ctrls
+      .btn(
+        v-for="ctrl of Bookmarks.reactive.popup.controls"
+        :class="{ '-inactive': ctrl.inactive }"
+        @click="onOk") {{translate(ctrl.label)}}
+      .btn.-warn(@click="onCancel") {{translate('btn.cancel')}}
+</template>
+
+<script lang="ts" setup>
+import { ref, reactive, computed, nextTick } from 'vue'
+import { translate } from 'src/dict'
+import type { Stored, TextInputComponent } from 'src/types'
+import { BkmType } from 'src/enums'
+import { NOID, BKM_ROOT_ID, BKM_OTHER_ID } from 'src/defaults'
+import * as Bookmarks from 'src/services/bookmarks.fg'
+import * as Selection from 'src/services/selection.fg'
+import BookmarkNode from 'src/components/bookmark-node.vue'
+import ScrollBox from 'src/components/scroll-box.vue'
+import LoadingDots from './loading-dots.vue'
+import TextInput from './text-input.vue'
+import * as Utils from 'src/utils'
+import * as Store from 'src/services/storage.fg'
+
+const nameInput = ref<TextInputComponent | null>(null)
+const urlInput = ref<TextInputComponent | null>(null)
+const newFolderTitleInput = ref<TextInputComponent | null>(null)
+
+const state = reactive({
+  loading: true,
+  wrongValueAnimation: false,
+  showTree: false,
+  tabindex: '-1',
+  type: 'bookmark' as browser.bookmarks.TreeNodeType,
+  title: '',
+  url: '',
+  newFolderTitle: '',
+  newFolderMode: false,
+  creatingNewFolder: false,
+  // path: [] as Bookmark[],
+  bookmarksRecentFolders: [] as Bookmarks.BkmNode[],
+})
+
+let validateTimeout: number | undefined
+
+const selectedFolder = computed((): string => {
+  const location = Bookmarks.reactive.popup?.location ?? NOID
+  if (location === NOID) return '---'
+  let folder = Bookmarks.byId.get(location)
+  if (!folder || folder.type !== BkmType.Folder) return '---'
+  return folder.title || '---'
+})
+
+const path = computed<string>(() => {
+  const location = Bookmarks.reactive.popup?.location ?? NOID
+  if (!Bookmarks.reactive.root.length) return ''
+  if (location === NOID) return ''
+  let folder = Bookmarks.byId.get(location)
+  if (!folder || folder.type !== BkmType.Folder) return ''
+
+  let result = folder.title + ' /'
+  folder.forEachAncestor(parent => {
+    result = parent.title + ' / ' + result
+  })
+
+  return result.trim()
+})
+
+const titlePlaceholder = computed((): string => {
+  if (state.type === 'bookmark') return 'bookmarks_editor.name_bookmark_placeholder'
+  else return 'bookmarks_editor.name_folder_placeholder'
+})
+
+void (async function init() {
+  if (!Bookmarks.reactive.popup) return
+
+  state.showTree = !!Bookmarks.reactive.popup.locationTree
+  state.tabindex = '0'
+
+  nextTick(() => {
+    if (nameInput.value) nameInput.value.recalcTextHeight()
+    if (urlInput.value) urlInput.value.recalcTextHeight()
+  })
+
+  setTimeout(() => {
+    const popup = Bookmarks.reactive.popup
+    if (!popup) return
+
+    if (nameInput.value) nameInput.value.focus()
+
+    if (popup.locationField && popup.location && popup.location !== NOID) {
+      Selection.selectBookmark(popup.location)
+
+      if (state.showTree) {
+        Bookmarks.collapseAllBookmarks('popup')
+        const folder = Bookmarks.byId.get(popup.location)
+        if (folder?.parentId && folder.parentId !== BKM_ROOT_ID) {
+          Bookmarks.expandBookmark(folder.parentId, 'popup')
+        }
+      }
+    }
+  }, 256)
+
+  const asyncTasks = []
+  if (!Bookmarks.reactive.root.length) asyncTasks.push(Bookmarks.load())
+  if (Bookmarks.reactive.popup.recentLocations) asyncTasks.push(loadBookmarksRecentFolders())
+  await Promise.all(asyncTasks)
+  checkDefaultLocation()
+  initRecentFolders()
+  state.loading = false
+
+  validate()
+})()
+
+function checkDefaultLocation() {
+  if (!Bookmarks.reactive.popup) return
+
+  const id = Bookmarks.reactive.popup.location
+  if (id === undefined || id === NOID || id === BKM_ROOT_ID) return
+
+  const node = Bookmarks.byId.get(id)
+  if (!node) Bookmarks.reactive.popup.location = BKM_OTHER_ID
+}
+
+let loadedRecentFolders: ID[] | undefined
+async function loadBookmarksRecentFolders() {
+  const stored = await browser.storage.local.get<Stored>('bookmarksRecentFolders')
+  if (!stored.bookmarksRecentFolders || !stored.bookmarksRecentFolders.length) return
+
+  loadedRecentFolders = stored.bookmarksRecentFolders
+}
+
+function initRecentFolders() {
+  if (!loadedRecentFolders) return
+
+  let firstFolderId: ID | undefined
+  const folders = []
+  for (const id of loadedRecentFolders) {
+    const folder = Bookmarks.byId.get(id)
+    if (folder) {
+      folders.push(folder)
+      if (!firstFolderId) firstFolderId = id
+    }
+  }
+
+  state.bookmarksRecentFolders = folders
+
+  const popup = Bookmarks.reactive.popup
+  if (popup && popup.recentLocationAsDefault && firstFolderId !== undefined) {
+    popup.location = firstFolderId
+  }
+}
+
+const RECENT_FOLDERS_LIMIT = 5
+async function saveBookmarksRecentFolders(lastFolderId: ID): Promise<void> {
+  const lastFolder = Bookmarks.byId.get(lastFolderId)
+  if (!lastFolder) return
+
+  const recentIndex = state.bookmarksRecentFolders.findIndex(f => f.id === lastFolderId)
+  if (recentIndex !== -1) state.bookmarksRecentFolders.splice(recentIndex, 1)
+
+  const ids: ID[] = [lastFolderId]
+  const limit = RECENT_FOLDERS_LIMIT - 1
+  for (let i = 0; i < limit; i++) {
+    const folder = state.bookmarksRecentFolders[i]
+    if (!folder) break
+
+    ids.push(folder.id)
+  }
+
+  await Store.set({ bookmarksRecentFolders: ids })
+}
+
+function toggleTree(): void {
+  if (!Bookmarks.reactive.popup?.location) return
+
+  state.showTree = !state.showTree
+
+  if (state.showTree) {
+    Bookmarks.collapseAllBookmarks('popup')
+    const folder = Bookmarks.byId.get(Bookmarks.reactive.popup.location)
+    if (folder?.parentId && folder.parentId !== BKM_ROOT_ID) {
+      Bookmarks.expandBookmark(folder.parentId, 'popup')
+      Selection.selectBookmark(folder.id)
+    }
+  } else {
+    Selection.resetSelection()
+    delete Bookmarks.reactive.expanded['popup']
+  }
+}
+
+async function onNewFolderClick(e: MouseEvent): Promise<void> {
+  if (!state.newFolderMode) {
+    state.newFolderMode = true
+    await nextTick()
+    if (newFolderTitleInput.value) newFolderTitleInput.value.focus()
+    return
+  }
+
+  if (!state.newFolderTitle) state.newFolderMode = false
+  else await createNewFolder()
+}
+
+async function createNewFolder(): Promise<void> {
+  if (!Bookmarks.reactive.popup) return
+
+  state.creatingNewFolder = true
+
+  const location = Bookmarks.reactive.popup.location ?? NOID
+  let parent = Bookmarks.byId.get(location)
+  if (!parent || parent.type !== BkmType.Folder) return
+
+  const newFolderPosition = Bookmarks.reactive.popup.newFolderPosition
+  let newFolderIndex
+  if (newFolderPosition && newFolderPosition[0] === parent.id) {
+    newFolderIndex = newFolderPosition[1]
+  } else {
+    newFolderIndex = parent.children?.length ?? 0
+  }
+
+  const nativeFolder = await browser.bookmarks
+    .create({
+      index: newFolderIndex,
+      parentId: parent.id,
+      title: state.newFolderTitle.trim(),
+      type: 'folder',
+    })
+    .catch(() => undefined)
+  const folder = nativeFolder ? Bookmarks.byId.get(nativeFolder.id) : undefined
+
+  if (!folder) {
+    state.creatingNewFolder = false
+    return
+  }
+
+  await Utils.sleep(750)
+
+  Bookmarks.reactive.popup.location = folder.id
+
+  if (state.showTree) {
+    Selection.resetSelection()
+    Selection.selectBookmark(folder.id)
+  }
+
+  state.newFolderMode = false
+  state.newFolderTitle = ''
+  state.creatingNewFolder = false
+}
+
+function onNewFolderKD(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    state.newFolderMode = false
+    state.newFolderTitle = ''
+  }
+  if (e.key === 'Enter') {
+    if (!state.newFolderTitle) state.newFolderMode = false
+    else createNewFolder()
+  }
+}
+
+function onTitleKD(e: KeyboardEvent): void {
+  if (e.key === 'Escape') onCancel()
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    onOk()
+  }
+}
+
+function onUrlKD(e: KeyboardEvent): void {
+  if (e.key === 'Escape') onCancel()
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    onOk()
+  }
+}
+
+function validate(): void {
+  clearTimeout(validateTimeout)
+  validateTimeout = setTimeout(() => {
+    if (Bookmarks.reactive.popup?.validate) {
+      Bookmarks.reactive.popup.validate(Bookmarks.reactive.popup)
+    }
+  }, 200)
+}
+
+function onOk(): void {
+  if (!Bookmarks.reactive.popup) return
+
+  if (!Bookmarks.reactive.popup.nameValid && nameInput.value) {
+    nameInput.value.error()
+    return
+  }
+
+  if (!Bookmarks.reactive.popup.urlValid && urlInput.value) {
+    urlInput.value.error()
+    return
+  }
+
+  if (Bookmarks.reactive.popup.location && Bookmarks.reactive.popup.recentLocations) {
+    saveBookmarksRecentFolders(Bookmarks.reactive.popup.location)
+  }
+
+  state.tabindex = '-1'
+  Selection.resetSelection()
+
+  if (state.showTree) delete Bookmarks.reactive.expanded['popup']
+
+  Bookmarks.reactive.popup.close({
+    name: Bookmarks.reactive.popup.name,
+    url: Bookmarks.reactive.popup.url,
+    location: Bookmarks.reactive.popup.location,
+    controlIndex: 0,
+  })
+}
+
+function onCancel(): void {
+  if (!Bookmarks.reactive.popup) return
+
+  state.tabindex = '-1'
+  Selection.resetSelection()
+
+  if (state.showTree) delete Bookmarks.reactive.expanded['popup']
+
+  Bookmarks.reactive.popup.close()
+}
+
+function foldersFilter(node: Bookmarks.BkmNode): boolean {
+  return node.type === BkmType.Folder
+}
+
+function onRecentFolderClick(folderId: ID): void {
+  if (!Bookmarks.reactive.popup) return
+  Bookmarks.reactive.popup.location = folderId
+}
+</script>

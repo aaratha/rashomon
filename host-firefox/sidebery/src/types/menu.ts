@@ -1,0 +1,47 @@
+// Config types
+export type MenuConfOptionId = string
+export type MenuConfSubOptions = { name?: string; opts: MenuConfOptionId[] }
+export type MenuConf = (MenuConfOptionId | MenuConfSubOptions)[]
+export interface MenuConfs {
+  tabs?: MenuConf
+  bookmarks?: MenuConf
+  tabsPanel?: MenuConf
+  bookmarksPanel?: MenuConf
+}
+
+// Internal types
+export type MenuOptionType = 'option' | 'separator'
+export interface MenuOptionFlag {
+  active?: boolean
+  icon?: string
+  onClick?: (opt: MenuOption) => void
+}
+export interface MenuOption {
+  type?: MenuOptionType
+  label?: string
+  tooltip?: string
+  icon?: string
+  img?: string
+  badge?: string
+  color?: string
+  colorCode?: string
+  containerColor?: string
+  inactive?: boolean
+  sub?: MenuOption[]
+  flag?: MenuOptionFlag
+  keepSearching?: boolean
+  onClick?: () => void
+  onAltClick?: () => void
+}
+export type MenuBlockType = 'list' | 'inline' | 'sub'
+export interface MenuBlock {
+  type: MenuBlockType
+  opts: MenuOption[]
+  name?: string
+}
+export interface MenuInvokeDetails {
+  x: number
+  y: number
+  blocks: MenuBlock[]
+  off?: () => void
+}
