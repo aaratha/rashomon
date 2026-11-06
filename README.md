@@ -70,7 +70,7 @@ Components talk to the kernel only through Primitives.**
                                         (owned by Kernel) ◄──owns── Kernel ──implements── Primitive
 ```
 
-(See `rashomon.pdf` for the rendered figure — the Kernel owns the Graph and implements Primitives; a Component reads/writes the Graph only through `rashomon:graph`, implements Facets, and accesses Primitives, never the reverse.)
+(See `docs/rashomon.pdf` for the rendered figure — the Kernel owns the Graph and implements Primitives; a Component reads/writes the Graph only through `rashomon:graph`, implements Facets, and accesses Primitives, never the reverse.)
 
 ---
 
