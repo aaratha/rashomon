@@ -1758,7 +1758,7 @@ fn ensure_component_built(name: &str) -> Result<PathBuf> {
 /// directory (e.g. `~/Library/Application Support/dev.rashomon.rashomon`
 /// on macOS, `~/.local/share/rashomon` on Linux) — created if it
 /// doesn't exist yet.
-fn graph_db_path() -> Result<PathBuf> {
+pub fn graph_db_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("dev", "rashomon", "rashomon")
         .context("could not determine a data directory for this OS/user")?;
     let data_dir = dirs.data_dir();
